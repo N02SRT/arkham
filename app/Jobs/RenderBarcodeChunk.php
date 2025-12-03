@@ -45,25 +45,29 @@ class RenderBarcodeChunk implements ShouldQueue
         $rootRel = $this->root;
 
         // feature flags (per-job overrides via Redis, with sane defaults)
+        // Defaults only used if Redis key doesn't exist (formats not explicitly set)
         $makeJpg = true;
         $makePdf = (bool) config('barcodes.enable_pdf', false);
         $makeEps = (bool) config('barcodes.enable_eps', false);
 
         $optKey = "barcodes:options:job:{$this->barcodeJobId}";
         try {
-            $jpgOpt = Redis::hget($optKey, 'jpg');
-            $pdfOpt = Redis::hget($optKey, 'pdf');
-            $epsOpt = Redis::hget($optKey, 'eps');
+            // Check if the options key exists (means formats were explicitly set in API)
+            $hasOptions = Redis::exists($optKey);
+            
+            if ($hasOptions) {
+                // Formats were explicitly set - read and respect those values exactly
+                $jpgOpt = Redis::hget($optKey, 'jpg');
+                $pdfOpt = Redis::hget($optKey, 'pdf');
+                $epsOpt = Redis::hget($optKey, 'eps');
 
-            if ($jpgOpt !== null) {
-                $makeJpg = $jpgOpt === '1';
+                // When formats are explicitly set, all values are stored in Redis
+                // Use the stored values (even if '0' to disable a format)
+                $makeJpg = ($jpgOpt === '1');
+                $makePdf = ($pdfOpt === '1');
+                $makeEps = ($epsOpt === '1');
             }
-            if ($pdfOpt !== null) {
-                $makePdf = $pdfOpt === '1';
-            }
-            if ($epsOpt !== null) {
-                $makeEps = $epsOpt === '1';
-            }
+            // If key doesn't exist, use defaults (formats not provided in API call)
         } catch (\Throwable $e) {
             Log::warning('RenderBarcodeChunk: failed to read per-job options; falling back to defaults', [
                 'job_row' => $this->barcodeJobId,
@@ -93,6 +97,7 @@ class RenderBarcodeChunk implements ShouldQueue
             'start'      => $this->startBase,
             'end'        => $this->endBase,
             'root'       => $this->root,
+            'enable_jpg' => $makeJpg,
             'enable_pdf' => $makePdf,
             'enable_eps' => $makeEps,
             'opt_pdf'    => $optimizePdf,
