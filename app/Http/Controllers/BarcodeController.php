@@ -309,27 +309,32 @@ class BarcodeController extends Controller
             ], 422);
         }
 
-        // If this order number has previous jobs, remove their files so the new request
-        // becomes the single source of truth for that order's package.
+        // If this order number has previous jobs, remove their files AND delete the old job records
+        // so the new request becomes the single source of truth for that order's package.
         try {
             $disk = Storage::disk(config('barcodes.disk', config('filesystems.default')));
             $oldJobs = BarcodeJob::where('order_no', $data['order_no'])->get();
+            $deletedIds = [];
             foreach ($oldJobs as $old) {
+                // Delete files
                 if ($old->root) {
                     $disk->deleteDirectory($old->root);
                 }
                 if ($old->zip_rel_path) {
                     $disk->delete($old->zip_rel_path);
                 }
+                // Delete the database record so the old job_id becomes invalid
+                $deletedIds[] = $old->id;
+                $old->delete();
             }
-            if ($oldJobs->isNotEmpty()) {
-                Log::info('API: cleaned up old barcode files for existing order', [
+            if (!empty($deletedIds)) {
+                Log::info('API: cleaned up old barcode files and deleted old job records for existing order', [
                     'order_no' => $data['order_no'],
-                    'jobs'     => $oldJobs->pluck('id'),
+                    'deleted_job_ids' => $deletedIds,
                 ]);
             }
         } catch (\Throwable $e) {
-            Log::warning('API: failed to clean up old files for existing order', [
+            Log::warning('API: failed to clean up old files/jobs for existing order', [
                 'order_no' => $data['order_no'],
                 'error'    => $e->getMessage(),
             ]);
