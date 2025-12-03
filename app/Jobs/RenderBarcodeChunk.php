@@ -44,9 +44,32 @@ class RenderBarcodeChunk implements ShouldQueue
         $disk    = Storage::disk();   // default disk
         $rootRel = $this->root;
 
-        // feature flags
+        // feature flags (per-job overrides via Redis, with sane defaults)
+        $makeJpg = true;
         $makePdf = (bool) config('barcodes.enable_pdf', false);
         $makeEps = (bool) config('barcodes.enable_eps', false);
+
+        $optKey = "barcodes:options:job:{$this->barcodeJobId}";
+        try {
+            $jpgOpt = Redis::hget($optKey, 'jpg');
+            $pdfOpt = Redis::hget($optKey, 'pdf');
+            $epsOpt = Redis::hget($optKey, 'eps');
+
+            if ($jpgOpt !== null) {
+                $makeJpg = $jpgOpt === '1';
+            }
+            if ($pdfOpt !== null) {
+                $makePdf = $pdfOpt === '1';
+            }
+            if ($epsOpt !== null) {
+                $makeEps = $epsOpt === '1';
+            }
+        } catch (\Throwable $e) {
+            Log::warning('RenderBarcodeChunk: failed to read per-job options; falling back to defaults', [
+                'job_row' => $this->barcodeJobId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
 
         // size/quality knobs (optional)
         $optimizePdf = (bool) config('barcodes.optimize_pdf', true);
@@ -109,13 +132,15 @@ class RenderBarcodeChunk implements ShouldQueue
                 $eanEpsAbs = Storage::path($eanEpsRel);
 
                 // --- render original JPGs ---
-                if (!$disk->exists($upcJpgRel)) {
-                    $upcRenderer->render($upc12, $upcJpgAbs, $ttf);
-                    Log::info('RenderBarcodeChunk: wrote jpg', ['path' => $upcJpgAbs]);
-                }
-                if (!$disk->exists($eanJpgRel)) {
-                    $eanRenderer->render($ean13, $eanJpgAbs, $ttf);
-                    Log::info('RenderBarcodeChunk: wrote jpg', ['path' => $eanJpgAbs]);
+                if ($makeJpg) {
+                    if (!$disk->exists($upcJpgRel)) {
+                        $upcRenderer->render($upc12, $upcJpgAbs, $ttf);
+                        Log::info('RenderBarcodeChunk: wrote jpg', ['path' => $upcJpgAbs]);
+                    }
+                    if (!$disk->exists($eanJpgRel)) {
+                        $eanRenderer->render($ean13, $eanJpgAbs, $ttf);
+                        Log::info('RenderBarcodeChunk: wrote jpg', ['path' => $eanJpgAbs]);
+                    }
                 }
 
                 // --- PDFs ---

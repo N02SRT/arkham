@@ -211,6 +211,25 @@ class FinalizeBarcodePackage implements ShouldQueue
      */
     private function writeUpcNumberListXls($disk, string $rootRel, string $orderNo): void
     {
+        // Check per-job options to see if XLS is desired
+        $optKey = "barcodes:options:job:{$this->barcodeJobId}";
+        try {
+            $xlsOpt = Redis::hget($optKey, 'xls');
+            if ($xlsOpt === '0') {
+                Log::info('FinalizeBarcodePackage: XLS generation disabled for job', [
+                    'jobRowId' => $this->barcodeJobId,
+                    'root'     => $rootRel,
+                ]);
+                return;
+            }
+        } catch (\Throwable $e) {
+            // If Redis unavailable, fall back to default behavior (generate XLS)
+            Log::warning('FinalizeBarcodePackage: failed to read XLS option; defaulting to enabled', [
+                'jobRowId' => $this->barcodeJobId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+
         $jpgDirRel = $rootRel . '/UPC-12/JPG';
         if (!$disk->exists($jpgDirRel)) {
             return;

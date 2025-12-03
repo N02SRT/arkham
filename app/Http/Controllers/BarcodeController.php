@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 
 class BarcodeController extends Controller
 {
@@ -281,12 +282,16 @@ class BarcodeController extends Controller
                 // Optional webhook back to the caller (e.g. Speedy)
                 'callback_url'   => ['nullable', 'url', 'max:2000'],
                 'callback_token' => ['nullable', 'string', 'max:255'],
+                // Optional per-job output format selection
+                // e.g. ["jpg","pdf"], ["jpg","pdf","eps","xls"], etc.
+                'formats'   => ['nullable', 'array'],
+                'formats.*' => ['string', Rule::in(['jpg','pdf','eps','xls'])],
             ]);
         } catch (\Illuminate\Validation\ValidationException $e) {
             Log::warning('API: Barcode job creation validation failed', [
                 'ip'         => $req->ip(),
                 'errors'     => $e->errors(),
-                'request_data' => $req->only(['order_no', 'start', 'end', 'callback_url']),
+                'request_data' => $req->only(['order_no', 'start', 'end', 'callback_url', 'formats']),
             ]);
             throw $e;
         }
@@ -333,6 +338,33 @@ class BarcodeController extends Controller
                 Redis::expire($cbKey, 3 * 86400);
             } catch (\Throwable $e) {
                 Log::warning('API: failed to store callback metadata for barcode job', [
+                    'job_id'   => $job->id,
+                    'order_no' => $job->order_no,
+                    'error'    => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // Persist per-job output format preferences, if provided.
+        // If formats is omitted or empty, we fall back to global config:
+        // - JPG always on
+        // - PDF/EPS controlled by barcodes.enable_pdf / barcodes.enable_eps
+        $formats = $data['formats'] ?? null;
+        if (is_array($formats) && count($formats) > 0) {
+            $optKey = "barcodes:options:job:{$job->id}";
+            try {
+                $jpg = in_array('jpg', $formats, true);
+                $pdf = in_array('pdf', $formats, true);
+                $eps = in_array('eps', $formats, true);
+                $xls = in_array('xls', $formats, true);
+
+                Redis::hset($optKey, 'jpg', $jpg ? '1' : '0');
+                Redis::hset($optKey, 'pdf', $pdf ? '1' : '0');
+                Redis::hset($optKey, 'eps', $eps ? '1' : '0');
+                Redis::hset($optKey, 'xls', $xls ? '1' : '0');
+                Redis::expire($optKey, 3 * 86400);
+            } catch (\Throwable $e) {
+                Log::warning('API: failed to store per-job format options', [
                     'job_id'   => $job->id,
                     'order_no' => $job->order_no,
                     'error'    => $e->getMessage(),
