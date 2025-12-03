@@ -31,10 +31,19 @@ class WaitForBatchAndFinalize implements ShouldQueue
 
     public function handle(): void
     {
-        // 1) Read Redis progress hash for THIS job id
+        // 1) Read Redis progress hash for THIS job id (optional: falls back gracefully if Redis is unavailable)
         $k = "barcodes:progress:job:{$this->barcodeJobId}";
-        $done  = (int) (Redis::hget($k, 'done')  ?? 0);
-        $total = (int) (Redis::hget($k, 'total') ?? 0);
+        $done  = 0;
+        $total = 0;
+        try {
+            $done  = (int) (Redis::hget($k, 'done')  ?? 0);
+            $total = (int) (Redis::hget($k, 'total') ?? 0);
+        } catch (\Throwable $e) {
+            Log::debug('WaitForBatchAndFinalize: Redis unavailable for progress read, using DB only', [
+                'job_id' => $this->barcodeJobId,
+                'error'  => $e->getMessage(),
+            ]);
+        }
 
         // 2) DB fallback (in case Redis 'done' isn't being incremented yet)
         $bj = BarcodeJob::find($this->barcodeJobId);

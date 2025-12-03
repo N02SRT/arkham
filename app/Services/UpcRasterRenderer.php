@@ -13,7 +13,7 @@ class UpcRasterRenderer
     // Canvas / resolution
     private const WIDTH   = 460;
     private const HEIGHT  = 300;
-    private const DPI     = 300;      // will be embedded in the JPEG's JFIF header
+    private const DPI     = 72;      // will be embedded in the JPEG's JFIF header
 
     // Layout (px) — tweak if you want tiny visual adjustments
     private const QUIET_X       = 42; // left/right quiet zone width (also the single-digit boxes)
@@ -21,7 +21,7 @@ class UpcRasterRenderer
     private const GAP_BARS_TX   = -10;  // gap between bars and digits baseline
     private const TEXT_H        = 72; // block height reserved for digits (visual cap)
     private const FONT_SIZE     = 34; // OCR-B point size for 300px height; adjust 32–36 if needed
-    private const JPEG_QUALITY  = 95;
+    private const JPEG_QUALITY  = 70;
 
 
     public function renderUpcJpeg(string $upc12, string $ttfAbsPath): string

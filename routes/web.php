@@ -3,29 +3,25 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\BarcodeController;
 
-Route::get('/', function () {
-    return view('welcome');
-});
+Route::redirect('/', '/barcodes');
 
-Route::get('/barcodes', [BarcodeController::class, 'showForm'])->name('barcodes.index'); // optional helper
-Route::get('/barcodes', [BarcodeController::class, 'showForm'])->name('barcodes.form'); // optional helper
+// List + create
+Route::get('/barcodes', [BarcodeController::class, 'index'])->name('barcodes.index');
 Route::post('/barcodes', [BarcodeController::class, 'store'])->name('barcodes.store');
+Route::get('/barcodes/create',       [BarcodeController::class, 'showForm'])->name('barcodes.create'); // ✅ add this
 
-Route::get('/barcodes/{barcodeJob}', [BarcodeController::class, 'show'])->name('barcodes.show');
-Route::get('/barcodes/{barcodeJob}/json', [BarcodeController::class, 'json'])->name('barcodes.json');
+// Show one job
+Route::get('/barcodes/{barcodeJob}', [\App\Http\Controllers\BarcodeController::class, 'show'])
+    ->name('barcodes.show');
+
+// Polling endpoint (JSON)
+Route::get('/barcodes/{barcodeJob}/status', [BarcodeController::class, 'status'])->name('barcodes.status');
+
+// JSON: latest/paginated job summaries for live updates on the index page
+Route::get('/barcodes-feed', [BarcodeController::class, 'feed'])->name('barcodes.feed');
+
+// Download (if you already have a signed URL, skip this)
 Route::get('/barcodes/{barcodeJob}/download', [BarcodeController::class, 'download'])->name('barcodes.download');
 
-
-Route::get('/dev/upc/{base11}', function (string $base11) {
-    abort_unless(preg_match('/^\d{11}$/', $base11), 400, 'base11 must be 11 digits');
-
-    $r   = app(\App\Services\UpcRasterRenderer::class);
-    $upc = $r->makeUpc12($base11);
-
-    $jpeg = $r->renderUpcJpeg($upc, resource_path('fonts/OCRB.ttf'));
-
-    return response($jpeg, 200, [
-        'Content-Type'  => 'image/jpeg',
-        'Cache-Control' => 'no-store',
-    ]);
-})->where('base11', '\d{11}');
+// Delete
+Route::delete('/barcodes/{barcodeJob}', [BarcodeController::class, 'destroy'])->name('barcodes.destroy');

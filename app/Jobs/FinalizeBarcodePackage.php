@@ -19,7 +19,7 @@ class FinalizeBarcodePackage implements ShouldQueue
     public $tries   = 3;
 
     public function __construct(
-        public string $root,          // e.g. barcodes/order-20250901-044730-mIHh3p  (relative to disk)
+        public string $root,          // e.g. barcodes/order-20250901-044730-XXXXXX
         public string $orderNo,
         public string $barcodeJobId
     ) {
@@ -29,92 +29,80 @@ class FinalizeBarcodePackage implements ShouldQueue
     public function handle(): void
     {
         $lockKey = "barcodes:finalize:lock:{$this->barcodeJobId}";
-
-        // Prefer atomic NX+EX if available
-        if (!Redis::set($lockKey, (string) time(), 'EX', 600, 'NX')) {
+        if (!Redis::setnx($lockKey, (string) time())) {
             Log::info('FinalizeBarcodePackage: another finalizer already running', ['jobRowId' => $this->barcodeJobId]);
             return;
         }
+        Redis::expire($lockKey, 600);
+
+        $diskName = config('barcodes.disk', config('filesystems.default'));
+        $disk     = Storage::disk($diskName);
 
         try {
             Log::info('FinalizeBarcodePackage: start', [
                 'root'    => $this->root,
                 'jobRowId'=> $this->barcodeJobId,
+                'disk'    => $diskName,
             ]);
 
-            $disk    = Storage::disk(); // default disk
             $rootRel = $this->root;
-            $rootAbs = Storage::path($rootRel);
-
+            $rootAbs = $disk->path($rootRel);
             if (!is_dir($rootAbs)) {
                 throw new \RuntimeException("Root not found: {$rootAbs}");
             }
 
-            // Zip alongside the folder: barcodes/<order>.zip
-            $zipRel = dirname($rootRel) . '/' . basename($rootRel) . '.zip';
-            $zipAbs = Storage::path($zipRel);
+            // 1) Ensure directory skeleton (matches the sample package layout)
+            $this->ensureSkeleton($disk, $rootRel);
 
-            // Idempotent: remove any existing zip
+            // 2) Copy top-level extras (rename invoice/certificate to include order #)
+            $this->copyTopLevelExtras($disk, $rootRel, $this->orderNo);
+
+            // 3) Create UPC number list CSV (saved with .xls extension like the sample)
+            $this->writeUpcNumberListXls($disk, $rootRel, $this->orderNo);
+
+            // 4) Build ZIP
+            $zipRel = dirname($rootRel) . '/' . basename($rootRel) . '.zip';
             if ($disk->exists($zipRel)) {
                 $disk->delete($zipRel);
             }
-            @mkdir(dirname($zipAbs), 0775, true);
+            $zipAbs = $disk->path($zipRel);
 
-            $zip = new \ZipArchive();
-            if ($zip->open($zipAbs, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
-                throw new \RuntimeException("Cannot open zip for write: {$zipAbs}");
+            // Pre-count for logging (also useful when 7z path is used)
+            [$expectedFiles, $expectedBytes] = $this->countFilesAndBytes($rootAbs);
+
+            // Prefer multi-core 7-Zip if present
+            $usedSevenZ = $this->buildZipMultiCore($rootAbs, $zipAbs);
+            $added = $expectedFiles;
+            $bytes = $expectedBytes;
+
+            if (!$usedSevenZ) {
+                // Fallback to ZipArchive (single-threaded)
+                [$added, $bytes] = $this->buildZipWithZipArchive($rootAbs, $zipAbs);
             }
-
-            // ONE pass only — include only the file types we care about, keep paths relative to $rootAbs
-            $allowed = ['jpg', 'jpeg', 'pdf', 'eps'];
-
-            $it = new \RecursiveIteratorIterator(
-                new \RecursiveDirectoryIterator($rootAbs, \FilesystemIterator::SKIP_DOTS)
-            );
-
-            $count = 0; $bytes = 0;
-            foreach ($it as $fsItem) {
-                if (!$fsItem->isFile()) continue;
-
-                $ext = strtolower($fsItem->getExtension());
-                if (!in_array($ext, $allowed, true)) continue;
-
-                $abs = $fsItem->getPathname();
-                // Inside-zip path like: "UPC-12/JPG/UPC-12-XXXX.jpg"
-                $rel = ltrim(str_replace($rootAbs, '', $abs), DIRECTORY_SEPARATOR);
-
-                if (!$zip->addFile($abs, $rel)) {
-                    Log::warning('FinalizeBarcodePackage: failed adding file to zip', ['file' => $abs]);
-                    continue;
-                }
-                $count++;
-                $bytes += (int) @filesize($abs);
-            }
-
-            $zip->close();
 
             if (!$disk->exists($zipRel)) {
                 throw new \RuntimeException("Zip not found after close: {$zipAbs}");
             }
 
-            // Mark job finished so UI shows the download button
-            BarcodeJob::where('id', $this->barcodeJobId)->update([
+            // 5) Update DB so the UI shows the download button
+            $bj = BarcodeJob::find($this->barcodeJobId);
+            $bj?->update([
                 'zip_rel_path' => $zipRel,
                 'finished_at'  => now(),
             ]);
 
-            // Push progress to Redis (nice-to-have)
-            $bj = BarcodeJob::find($this->barcodeJobId);
+            // Mark counters complete in Redis (nice-to-have)
+            $k = "barcodes:progress:job:{$this->barcodeJobId}";
             if ($bj && $bj->total_jobs) {
-                $k = "barcodes:progress:job:{$this->barcodeJobId}";
                 Redis::hset($k, 'done', $bj->total_jobs);
                 Redis::expire($k, 86400);
             }
 
             Log::info('FinalizeBarcodePackage: zip written', [
                 'zip'   => $zipRel,
-                'files' => $count,
+                'files' => $added,
                 'bytes' => $bytes,
+                'engine'=> $usedSevenZ ? '7z' : 'ZipArchive',
             ]);
         } catch (\Throwable $e) {
             Log::error('FinalizeBarcodePackage: failed', [
@@ -126,5 +114,194 @@ class FinalizeBarcodePackage implements ShouldQueue
         } finally {
             Redis::del($lockKey);
         }
+    }
+
+    /**
+     * Create the directory skeleton that mirrors the sample package.
+     */
+    private function ensureSkeleton($disk, string $rootRel): void
+    {
+        $dirs = [
+            'UPC-12/JPG', 'UPC-12/PDF', 'UPC-12/EPS',
+            'EAN-13/JPG', 'EAN-13/PDF', 'EAN-13/EPS',
+            'Speedy Extras',
+        ];
+        foreach ($dirs as $d) {
+            $disk->makeDirectory(trim($rootRel . '/' . $d, '/'));
+        }
+    }
+
+    /**
+     * Copy top-level PDFs if present in resources/barcodes.
+     * - !Read Me First.pdf
+     * - Speedy Invoice-Sample.pdf   -> Speedy Invoice-<ORDER>.pdf
+     * - Speedy Certificate-Sample.pdf -> Speedy Certificate-<ORDER>.pdf
+     */
+    private function copyTopLevelExtras($disk, string $rootRel, string $orderNo): void
+    {
+        $srcBase = resource_path('barcodes');
+
+        $map = [
+            '!Read Me First.pdf'            => '!Read Me First.pdf',
+            'Speedy Invoice-Sample.pdf'     => 'Speedy Invoice-' . $orderNo . '.pdf',
+            'Speedy Certificate-Sample.pdf' => 'Speedy Certificate-' . $orderNo . '.pdf',
+        ];
+
+        foreach ($map as $srcName => $destName) {
+            $src = $srcBase . DIRECTORY_SEPARATOR . $srcName;
+            $destRel = $rootRel . '/' . $destName;
+            if (is_readable($src) && !$disk->exists($destRel)) {
+                $disk->put($destRel, file_get_contents($src));
+                Log::info('FinalizeBarcodePackage: copied top-level extra', ['to' => $destRel]);
+            }
+        }
+    }
+
+    /**
+     * Produce a simple CSV (saved with .xls extension like the sample) for the UPCs we generated.
+     * We scan UPC-12/JPG and take codes from filenames "UPC-12-<12digits>.jpg".
+     */
+    private function writeUpcNumberListXls($disk, string $rootRel, string $orderNo): void
+    {
+        $jpgDirRel = $rootRel . '/UPC-12/JPG';
+        if (!$disk->exists($jpgDirRel)) {
+            return;
+        }
+
+        $files = $disk->files($jpgDirRel);
+        $codes = [];
+        foreach ($files as $rel) {
+            $bn = basename($rel);
+            if (preg_match('/^UPC-12-(\d{12})\.jpg$/', $bn, $m)) {
+                $codes[] = $m[1];
+            }
+        }
+        sort($codes, SORT_STRING);
+
+        // CSV content with header
+        $csv = "UPC-12\n" . implode("\n", $codes) . "\n";
+        $xlsRel = $rootRel . '/UPC-12/UPC-12 XLS Number List - Order # ' . $orderNo . '.xls';
+        $disk->put($xlsRel, $csv);
+        Log::info('FinalizeBarcodePackage: wrote UPC number list (xls-as-csv)', ['file' => $xlsRel]);
+    }
+
+    /**
+     * Try multi-core zipping via 7-Zip (7zz or 7z).
+     * Returns true on success (zip exists), false if 7z not available or failed.
+     */
+    private function buildZipMultiCore(string $rootAbs, string $zipAbs): bool
+    {
+        $sevenZ = trim(shell_exec('command -v 7zz || command -v 7z') ?? '');
+        if ($sevenZ === '') {
+            Log::info('FinalizeBarcodePackage: 7z/7zz not found; falling back to ZipArchive');
+            return false;
+        }
+
+        // Threads (use all cores if possible)
+        $threads = (int) (trim(shell_exec('nproc') ?? '0')) ?: 0;
+        $threadsArg = $threads > 0 ? " -mmt={$threads}" : " -mmt=on";
+
+        // Compression strategy:
+        //   copy   -> fastest (store only)
+        //   deflate-> smaller but slower
+        $mode   = config('barcodes.zip.compression', 'copy'); // 'copy' | 'deflate'
+        $level  = (int) config('barcodes.zip.level', 3);      // 0..9 (deflate only)
+        $method = $mode === 'deflate'
+            ? " -mm=Deflate -mx={$level}"
+            : " -mm=Copy -mx=0";
+
+        // Create parent directory for zip if needed
+        @mkdir(dirname($zipAbs), 0775, true);
+
+        $cwd = getcwd();
+        chdir($rootAbs);
+
+        // Add everything under the order folder (relative paths)
+        $cmd = escapeshellcmd($sevenZ) . " a -tzip{$threadsArg}{$method} " .
+            escapeshellarg($zipAbs) . " -r . 2>&1";
+
+        exec($cmd, $out, $code);
+        chdir($cwd);
+
+        Log::info('FinalizeBarcodePackage: 7z result', [
+            'cmd' => $cmd,
+            'exit' => $code,
+            'first_lines' => array_slice($out, 0, 8),
+        ]);
+
+        return $code === 0 && file_exists($zipAbs);
+    }
+
+    /**
+     * Single-threaded zipping via ZipArchive with smart per-file compression.
+     * Returns [filesAdded, totalBytes].
+     */
+    private function buildZipWithZipArchive(string $rootAbs, string $zipAbs): array
+    {
+        @mkdir(dirname($zipAbs), 0775, true);
+
+        $zip = new \ZipArchive();
+        if ($zip->open($zipAbs, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+            throw new \RuntimeException("Cannot open zip for write: {$zipAbs}");
+        }
+
+        $added = 0; $bytes = 0;
+
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($rootAbs, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+
+        foreach ($it as $fsItem) {
+            $realPath = $fsItem->getPathname();
+            $relPath  = ltrim(str_replace($rootAbs, '', $realPath), '/\\');
+
+            if ($fsItem->isDir()) {
+                $zip->addEmptyDir($relPath);
+                continue;
+            }
+
+            if ($zip->addFile($realPath, $relPath)) {
+                // Store already-compressed formats to avoid wasted CPU
+                $ext = strtolower(pathinfo($realPath, PATHINFO_EXTENSION));
+                if (in_array($ext, ['jpg','jpeg','png','pdf','eps','zip'])) {
+                    // CM_STORE = 0
+                    if (method_exists($zip, 'setCompressionName')) {
+                        $zip->setCompressionName($relPath, \ZipArchive::CM_STORE);
+                    }
+                } else {
+                    if (method_exists($zip, 'setCompressionName')) {
+                        $zip->setCompressionName($relPath, \ZipArchive::CM_DEFLATE);
+                    }
+                }
+
+                $added++;
+                $bytes += filesize($realPath) ?: 0;
+            } else {
+                Log::warning('FinalizeBarcodePackage: failed adding file to zip', ['file' => $realPath]);
+            }
+        }
+
+        $zip->close();
+        return [$added, $bytes];
+    }
+
+    /**
+     * Count files/bytes under a directory (for logging & expectations).
+     */
+    private function countFilesAndBytes(string $rootAbs): array
+    {
+        $count = 0; $bytes = 0;
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($rootAbs, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::LEAVES_ONLY
+        );
+        foreach ($it as $fsItem) {
+            if ($fsItem->isFile()) {
+                $count++;
+                $bytes += filesize($fsItem->getPathname()) ?: 0;
+            }
+        }
+        return [$count, $bytes];
     }
 }

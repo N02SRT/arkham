@@ -2,28 +2,81 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\FinalizeBarcodePackage;
 use App\Jobs\RenderBarcodeChunk;
 use App\Jobs\WaitForBatchAndFinalize;
 use App\Models\BarcodeJob;
+use Illuminate\Bus\Batch;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class BarcodeController extends Controller
 {
+    // index: search + paginate
+    public function index(\Illuminate\Http\Request $req) {
+        $q = $req->string('q');
+        $jobs = \App\Models\BarcodeJob::query()
+            ->when($q, fn($x)=>$x->where('order_no','like',"%{$q}%")->orWhere('id',$q))
+            ->latest()->paginate(10);
+        return view('barcodes.index', compact('jobs'));
+    }
 
-    public function showForm(){
+// show
+    public function show(\App\Models\BarcodeJob $barcodeJob)
+    {
+        $job = $barcodeJob;
+        $samples = [];
+        // Try barcodes/show first; fall back to legacy show.blade.php
+        return view()->first(['barcodes.show', 'show'], compact('job','samples'));
+    }
+
+// live status
+    public function status(Request $req, \App\Models\BarcodeJob $barcodeJob)
+    {
+        // Log status check request (used by both web and API)
+        if ($req->is('api/*')) {
+            Log::info('API: Barcode job status check', [
+                'method'     => $req->method(),
+                'path'       => $req->path(),
+                'ip'         => $req->ip(),
+                'user_agent' => $req->userAgent(),
+                'job_id'     => $barcodeJob->id,
+                'order_no'   => $barcodeJob->order_no,
+                'timestamp'  => now()->toISOString(),
+            ]);
+        }
+
+        return response()->json([
+            'batch_id'       => $barcodeJob->batch_id,
+            'processed_jobs' => $barcodeJob->processed_jobs ?? 0,
+            'total_jobs'     => $barcodeJob->total_jobs ?? 0,
+            'failed_jobs'    => $barcodeJob->failed_jobs ?? 0,
+            'ready'          => $barcodeJob->zip_rel_path && Storage::exists($barcodeJob->zip_rel_path),
+        ]);
+    }
+
+    public function destroy(\App\Models\BarcodeJob $barcodeJob) {
+        // optionally clean files: Storage::disk('s3')->deleteDirectory("barcodes/{$barcodeJob->id}");
+        $barcodeJob->delete();
+        return redirect()->route('barcodes.index')->with('ok','Job deleted.');
+    }
+
+    public function showForm()
+    {
         return view('barcodes.index');
     }
+
     public function store(Request $req)
     {
         $data = $req->validate([
             'start'     => ['required', 'regex:/^\d{11}$/'],
             'end'       => ['required', 'regex:/^\d{11}$/'],
-            'order_no'  => ['required', 'string', 'max:100'],
         ]);
+
         if (strcmp($data['start'], $data['end']) > 0) {
             return back()->withErrors(['end' => 'End must be >= start.'])->withInput();
         }
@@ -31,7 +84,7 @@ class BarcodeController extends Controller
         // output dirs
         $outBase = 'order-' . now()->format('Ymd-His') . '-' . Str::random(6);
         $root = "barcodes/{$outBase}";
-        foreach (['UPC-12/JPG','UPC-12/PDF','UPC-12/EPS'] as $p) {
+        foreach (['UPC-12/JPG', 'UPC-12/PDF', 'UPC-12/EPS'] as $p) {
             Storage::makeDirectory("{$root}/{$p}");
         }
 
@@ -40,7 +93,7 @@ class BarcodeController extends Controller
             'order_no'   => $data['order_no'],
             'root'       => $root,
             'started_at' => now(),
-            'total_jobs' => 0,        // will fill below
+            'total_jobs' => 0, // will fill below
         ]);
 
         // chunking
@@ -48,7 +101,9 @@ class BarcodeController extends Controller
         $jobs = [];
         for ($cursor = $data['start']; strcmp($cursor, $data['end']) <= 0; $cursor = $this->add($cursor, $chunkSize)) {
             $chunkEnd = $this->add($cursor, $chunkSize - 1);
-            if (strcmp($chunkEnd, $data['end']) > 0) $chunkEnd = $data['end'];
+            if (strcmp($chunkEnd, $data['end']) > 0) {
+                $chunkEnd = $data['end'];
+            }
             $jobs[] = new RenderBarcodeChunk($cursor, $chunkEnd, $root, $data['order_no'], $job->id);
         }
 
@@ -56,21 +111,28 @@ class BarcodeController extends Controller
             ->name("barcode-package-{$outBase}")
             ->allowFailures()
             ->onQueue(config('barcodes.queue', 'barcodes'))
-            ->then(function (Batch $b) use ($root, $data, $job) {
+            ->then(function (Batch $batch) use ($root, $data, $job) {
                 // Native completion callback — enqueue the finalizer
                 FinalizeBarcodePackage::dispatch($root, $data['order_no'], $job->id)
                     ->onQueue(config('barcodes.queue', 'barcodes'));
             })
             ->dispatch();
 
-// progress seed (for your UI)
-        $progressKey = "barcodes:progress:job:{$job->id}";
-        Redis::hset($progressKey, 'total', count($jobs));
-        Redis::hset($progressKey, 'done', 0);
-        Redis::expire($progressKey, 86400);
+        // progress seed (for your UI) - optional, falls back to batch if Redis unavailable
+        try {
+            $progressKey = "barcodes:progress:job:{$job->id}";
+            Redis::hset($progressKey, 'total', count($jobs));
+            Redis::hset($progressKey, 'done', 0);
+            Redis::expire($progressKey, 86400);
+        } catch (\Throwable $e) {
+            Log::warning('Redis unavailable for progress tracking, will use batch status', [
+                'job_id' => $job->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
 
-// (optional) still queue the watcher as a backup
-        \App\Jobs\WaitForBatchAndFinalize::dispatch($batch->id, $root, $data['order_no'], $job->id)
+        // (optional) queue the watcher as a backup
+        WaitForBatchAndFinalize::dispatch($batch->id, $root, $data['order_no'], $job->id)
             ->onQueue(config('barcodes.queue', 'barcodes'));
 
         \Log::info('BarcodeController: batch queued', [
@@ -81,25 +143,19 @@ class BarcodeController extends Controller
             'order_no'     => $data['order_no'],
         ]);
 
-        WaitForBatchAndFinalize::dispatch($batch->id, $root, $data['order_no'], $job->id)
-            ->onQueue(config('barcodes.queue', 'barcodes'));
-
         $job->update([
-            'batch_id'    => $batch->id,
-            'total_jobs'  => $batch->totalJobs,
+            'batch_id'   => $batch->id,
+            'total_jobs' => $batch->totalJobs,
         ]);
 
-        return redirect()->route('barcodes.show', $job->id);
-    }
-
-    public function show(BarcodeJob $barcodeJob)
-    {
-        return view('barcodes.show', ['job' => $barcodeJob]);
+        return response()->json(['redirect' => route('barcodes.show', $job)]);
     }
 
     public function json(BarcodeJob $barcodeJob)
     {
-        $batch = $barcodeJob->batch_id ? \Illuminate\Support\Facades\Bus::findBatch($barcodeJob->batch_id) : null;
+        $batch = $barcodeJob->batch_id
+            ? \Illuminate\Support\Facades\Bus::findBatch($barcodeJob->batch_id)
+            : null;
 
         $zipExists = $barcodeJob->zip_rel_path && Storage::exists($barcodeJob->zip_rel_path);
         if (!$barcodeJob->zip_rel_path) {
@@ -110,11 +166,19 @@ class BarcodeController extends Controller
             }
         }
 
-        $k      = "barcodes:progress:job:{$barcodeJob->id}";
-        $done   = (int) (Redis::hget($k, 'done')  ?? ($batch?->processedJobs() ?? $barcodeJob->processed_jobs ?? 0));
-        $total  = (int) (Redis::hget($k, 'total') ?? ($batch?->totalJobs      ?? $barcodeJob->total_jobs      ?? 0));
-        $pct    = $total > 0 ? (int) floor(($done / $total) * 100) : 0;
-        if ($zipExists) $pct = 100;
+        $k     = "barcodes:progress:job:{$barcodeJob->id}";
+        try {
+            $done  = (int) (Redis::hget($k, 'done') ?? ($batch?->processedJobs() ?? $barcodeJob->processed_jobs ?? 0));
+            $total = (int) (Redis::hget($k, 'total') ?? ($batch?->totalJobs ?? $barcodeJob->total_jobs ?? 0));
+        } catch (\Throwable $e) {
+            // Fall back to batch or database values if Redis unavailable
+            $done  = (int) ($batch?->processedJobs() ?? $barcodeJob->processed_jobs ?? 0);
+            $total = (int) ($batch?->totalJobs ?? $barcodeJob->total_jobs ?? 0);
+        }
+        $pct   = $total > 0 ? (int) floor(($done / $total) * 100) : 0;
+        if ($zipExists) {
+            $pct = 100;
+        }
 
         // keep DB in sync when batch object is available
         if ($batch) {
@@ -125,26 +189,320 @@ class BarcodeController extends Controller
         }
 
         return response()->json([
-            'id'              => $barcodeJob->id,
-            'order_no'        => $barcodeJob->order_no,
-            'batch_id'        => $barcodeJob->batch_id,
-            'total_jobs'      => $total,
-            'processed_jobs'  => $done,
-            'failed_jobs'     => $barcodeJob->failed_jobs,
-            'percentage'      => $pct,
-            'finished'        => (bool) $barcodeJob->finished_at,
-            'zip_url'         => $zipExists ? route('barcodes.download', $barcodeJob->id) : null,
+            'id'             => $barcodeJob->id,
+            'order_no'       => $barcodeJob->order_no,
+            'batch_id'       => $barcodeJob->batch_id,
+            'total_jobs'     => $total,
+            'processed_jobs' => $done,
+            'failed_jobs'    => $barcodeJob->failed_jobs,
+            'percentage'     => $pct,
+            'finished'       => (bool) $barcodeJob->finished_at,
+            'zip_url'        => $zipExists ? route('barcodes.download', $barcodeJob->id) : null,
         ]);
     }
 
-
-    public function download(BarcodeJob $barcodeJob)
+    public function download(\App\Models\BarcodeJob $barcodeJob)
     {
         abort_unless($barcodeJob->zip_rel_path && Storage::exists($barcodeJob->zip_rel_path), 404);
-        return response()->download(Storage::path($barcodeJob->zip_rel_path));
+
+        $name = 'barcodes-'.$barcodeJob->order_no.'-'.$barcodeJob->id.'.zip';
+        return response()->download(
+            Storage::path($barcodeJob->zip_rel_path),
+            $name,
+            ['Content-Type' => 'application/zip']
+        );
     }
 
-    private function add(string $s, int $by): string {
-        return str_pad((string) ((int)$s + $by), 11, '0', STR_PAD_LEFT);
+
+    private function add(string $s, int $by): string
+    {
+        return str_pad((string) ((int) $s + $by), 11, '0', STR_PAD_LEFT);
     }
+
+    private function optimizePdfWithGs(string $inPdf, string $outPdf, string $gsPath, int $jpegQ = 70, int $imgDpi = 300): void
+    {
+        @mkdir(dirname($outPdf), 0775, true);
+
+        $cmd = escapeshellcmd($gsPath)
+            .' -dSAFER -dBATCH -dNOPAUSE'
+            .' -sDEVICE=pdfwrite'
+            .' -dCompatibilityLevel=1.4'
+            // Recompress color/gray images with JPEG at desired quality
+            .' -dAutoFilterColorImages=false -dColorImageFilter=/DCTEncode'
+            .' -dAutoFilterGrayImages=false  -dGrayImageFilter=/DCTEncode'
+            .' -dDownsampleColorImages=true -dColorImageResolution='.(int)$imgDpi
+            .' -dDownsampleGrayImages=true  -dGrayImageResolution='.(int)$imgDpi
+            .' -dJPEGQ='.(int)$jpegQ
+            .' -sOutputFile='.escapeshellarg($outPdf)
+            .' '.escapeshellarg($inPdf).' 2>&1';
+
+        exec($cmd, $out, $code);
+        if ($code !== 0 || !file_exists($outPdf)) {
+            throw new \RuntimeException("Ghostscript optimize PDF failed ({$code}): ".implode("\n", $out));
+        }
+    }
+
+    public function feed(Request $req)
+    {
+        // Same filter as index()
+        $q = $req->string('q');
+        $jobs = BarcodeJob::query()
+            ->when($q, fn($x)=>$x->where('order_no','like',"%{$q}%")->orWhere('id',$q))
+            ->latest()->paginate(10);
+
+        // Return a compact JSON payload used by the index poller
+        return response()->json([
+            'html' => view('barcodes.partials.table-rows', ['jobs' => $jobs])->render(),
+            'pagination' => (string) $jobs->withQueryString()->links(),
+        ]);
+    }
+
+    /**
+     * API endpoint to process barcode jobs
+     * POST /api/barcodes
+     */
+    public function apiStore(Request $req)
+    {
+        // Log incoming API request
+        Log::info('API: Barcode job creation request', [
+            'method'     => $req->method(),
+            'path'       => $req->path(),
+            'ip'         => $req->ip(),
+            'user_agent' => $req->userAgent(),
+            'request_data' => $req->only(['order_no', 'start', 'end']),
+            'timestamp'  => now()->toISOString(),
+        ]);
+
+        try {
+            $data = $req->validate([
+                'order_no' => ['required', 'string', 'max:255'],
+                'start'    => ['required', 'regex:/^\d{11}$/'],
+                'end'      => ['required', 'regex:/^\d{11}$/'],
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            Log::warning('API: Barcode job creation validation failed', [
+                'ip'         => $req->ip(),
+                'errors'     => $e->errors(),
+                'request_data' => $req->only(['order_no', 'start', 'end']),
+            ]);
+            throw $e;
+        }
+
+        if (strcmp($data['start'], $data['end']) > 0) {
+            Log::warning('API: Barcode job creation - invalid range', [
+                'ip'         => $req->ip(),
+                'start'      => $data['start'],
+                'end'        => $data['end'],
+                'order_no'   => $data['order_no'],
+            ]);
+            return response()->json([
+                'error' => 'Validation failed',
+                'message' => 'End must be >= start.',
+            ], 422);
+        }
+
+        // output dirs
+        $outBase = 'order-' . now()->format('Ymd-His') . '-' . Str::random(6);
+        $root = "barcodes/{$outBase}";
+        foreach (['UPC-12/JPG', 'UPC-12/PDF', 'UPC-12/EPS', 'EAN-13/JPG', 'EAN-13/PDF', 'EAN-13/EPS'] as $p) {
+            Storage::makeDirectory("{$root}/{$p}");
+        }
+
+        // DB row
+        $job = BarcodeJob::create([
+            'order_no'   => $data['order_no'],
+            'root'       => $root,
+            'started_at' => now(),
+            'total_jobs' => 0, // will fill below
+        ]);
+
+        // chunking
+        $chunkSize = (int) config('barcodes.chunk_size', 200);
+        $jobs = [];
+        for ($cursor = $data['start']; strcmp($cursor, $data['end']) <= 0; $cursor = $this->add($cursor, $chunkSize)) {
+            $chunkEnd = $this->add($cursor, $chunkSize - 1);
+            if (strcmp($chunkEnd, $data['end']) > 0) {
+                $chunkEnd = $data['end'];
+            }
+            $jobs[] = new RenderBarcodeChunk($cursor, $chunkEnd, $root, $data['order_no'], $job->id);
+        }
+
+        $batch = Bus::batch($jobs)
+            ->name("barcode-package-{$outBase}")
+            ->allowFailures()
+            ->onQueue(config('barcodes.queue', 'barcodes'))
+            ->then(function (Batch $batch) use ($root, $data, $job) {
+                // Native completion callback — enqueue the finalizer
+                FinalizeBarcodePackage::dispatch($root, $data['order_no'], $job->id)
+                    ->onQueue(config('barcodes.queue', 'barcodes'));
+            })
+            ->dispatch();
+
+        // progress seed (for your UI) - optional, falls back to batch if Redis unavailable
+        try {
+            $progressKey = "barcodes:progress:job:{$job->id}";
+            Redis::hset($progressKey, 'total', count($jobs));
+            Redis::hset($progressKey, 'done', 0);
+            Redis::expire($progressKey, 86400);
+        } catch (\Throwable $e) {
+            Log::warning('Redis unavailable for progress tracking, will use batch status', [
+                'job_id' => $job->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        // (optional) queue the watcher as a backup
+        WaitForBatchAndFinalize::dispatch($batch->id, $root, $data['order_no'], $job->id)
+            ->onQueue(config('barcodes.queue', 'barcodes'));
+
+        \Log::info('BarcodeController: batch queued via API', [
+            'barcodeJobId' => $job->id,
+            'batch_id'     => $batch->id,
+            'total_jobs'   => $batch->totalJobs,
+            'root'         => $root,
+            'order_no'     => $data['order_no'],
+        ]);
+
+        $job->update([
+            'batch_id'   => $batch->id,
+            'total_jobs' => $batch->totalJobs,
+        ]);
+
+        // Log successful job creation
+        Log::info('API: Barcode job created successfully', [
+            'ip'           => $req->ip(),
+            'job_id'       => $job->id,
+            'order_no'     => $job->order_no,
+            'batch_id'     => $batch->id,
+            'total_jobs'   => $batch->totalJobs,
+            'start'        => $data['start'],
+            'end'          => $data['end'],
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Barcode job created successfully',
+            'job' => [
+                'id'             => $job->id,
+                'order_no'       => $job->order_no,
+                'batch_id'       => $job->batch_id,
+                'total_jobs'     => $job->total_jobs,
+                'processed_jobs' => $job->processed_jobs,
+                'failed_jobs'    => $job->failed_jobs,
+                'started_at'     => $job->started_at?->toISOString(),
+                'status_url'     => route('api.barcodes.status', $job->id),
+                'download_url'   => null, // Will be available when job completes
+            ],
+        ], 201);
+    }
+
+    /**
+     * API endpoint to get barcode job status
+     * GET /api/barcodes/{barcodeJob}
+     */
+    public function apiShow(Request $req, BarcodeJob $barcodeJob)
+    {
+        // Log API status request
+        Log::info('API: Barcode job status request', [
+            'method'     => $req->method(),
+            'path'       => $req->path(),
+            'ip'         => $req->ip(),
+            'user_agent' => $req->userAgent(),
+            'job_id'     => $barcodeJob->id,
+            'order_no'   => $barcodeJob->order_no,
+            'timestamp'  => now()->toISOString(),
+        ]);
+        $batch = $barcodeJob->batch_id
+            ? Bus::findBatch($barcodeJob->batch_id)
+            : null;
+
+        $zipExists = $barcodeJob->zip_rel_path && Storage::exists($barcodeJob->zip_rel_path);
+        if (!$barcodeJob->zip_rel_path) {
+            $zipRelGuess = dirname($barcodeJob->root) . '/' . basename($barcodeJob->root) . '.zip';
+            if (Storage::exists($zipRelGuess)) {
+                $barcodeJob->update(['zip_rel_path' => $zipRelGuess, 'finished_at' => now()]);
+                $zipExists = true;
+            }
+        }
+
+        $k     = "barcodes:progress:job:{$barcodeJob->id}";
+        try {
+            $done  = (int) (Redis::hget($k, 'done') ?? ($batch?->processedJobs() ?? $barcodeJob->processed_jobs ?? 0));
+            $total = (int) (Redis::hget($k, 'total') ?? ($batch?->totalJobs ?? $barcodeJob->total_jobs ?? 0));
+        } catch (\Throwable $e) {
+            // Fall back to batch or database values if Redis unavailable
+            $done  = (int) ($batch?->processedJobs() ?? $barcodeJob->processed_jobs ?? 0);
+            $total = (int) ($batch?->totalJobs ?? $barcodeJob->total_jobs ?? 0);
+        }
+        $pct   = $total > 0 ? (int) floor(($done / $total) * 100) : 0;
+        if ($zipExists) {
+            $pct = 100;
+        }
+
+        // keep DB in sync when batch object is available
+        if ($batch) {
+            $barcodeJob->update([
+                'processed_jobs' => $batch->processedJobs(),
+                'failed_jobs'    => $batch->failedJobs,
+            ]);
+        }
+
+        return response()->json([
+            'id'             => $barcodeJob->id,
+            'order_no'       => $barcodeJob->order_no,
+            'batch_id'       => $barcodeJob->batch_id,
+            'total_jobs'     => $total,
+            'processed_jobs' => $done,
+            'failed_jobs'    => $barcodeJob->failed_jobs,
+            'percentage'     => $pct,
+            'finished'       => (bool) $barcodeJob->finished_at,
+            'started_at'     => $barcodeJob->started_at?->toISOString(),
+            'finished_at'    => $barcodeJob->finished_at?->toISOString(),
+            'zip_url'        => $zipExists ? route('api.barcodes.download', $barcodeJob->id) : null,
+        ]);
+    }
+
+    /**
+     * API endpoint to download barcode job zip file
+     * GET /api/barcodes/{barcodeJob}/download
+     */
+    public function apiDownload(Request $req, BarcodeJob $barcodeJob)
+    {
+        // Log API download request
+        Log::info('API: Barcode job download request', [
+            'method'     => $req->method(),
+            'path'       => $req->path(),
+            'ip'         => $req->ip(),
+            'user_agent' => $req->userAgent(),
+            'job_id'     => $barcodeJob->id,
+            'order_no'   => $barcodeJob->order_no,
+            'timestamp'  => now()->toISOString(),
+        ]);
+
+        if (!$barcodeJob->zip_rel_path || !Storage::exists($barcodeJob->zip_rel_path)) {
+            Log::warning('API: Barcode job download failed - file not found', [
+                'ip'       => $req->ip(),
+                'job_id'   => $barcodeJob->id,
+                'order_no' => $barcodeJob->order_no,
+                'zip_path' => $barcodeJob->zip_rel_path,
+            ]);
+            abort(404, 'Zip file not found');
+        }
+
+        $name = 'barcodes-'.$barcodeJob->order_no.'-'.$barcodeJob->id.'.zip';
+        
+        Log::info('API: Barcode job download successful', [
+            'ip'       => $req->ip(),
+            'job_id'   => $barcodeJob->id,
+            'order_no' => $barcodeJob->order_no,
+            'filename' => $name,
+        ]);
+
+        return response()->download(
+            Storage::path($barcodeJob->zip_rel_path),
+            $name,
+            ['Content-Type' => 'application/zip']
+        );
+    }
+
 }

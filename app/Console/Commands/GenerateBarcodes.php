@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Storage;
 use App\Jobs\RenderBarcodeChunk;
 use App\Jobs\FinalizeBarcodePackage;
+use App\Models\BarcodeJob;
 
 class GenerateBarcodes extends Command
 {
@@ -19,6 +20,12 @@ class GenerateBarcodes extends Command
         {--out= : Optional output dir under storage/app/barcodes}';
 
     protected $description = 'Generate a full barcode package (UPC-12 & EAN-13) for a base range.';
+
+    // Either omit __construct completely, or keep the simple parent call:
+    // public function __construct()
+    // {
+    //     parent::__construct();
+    // }
 
     public function handle(): int
     {
@@ -45,18 +52,30 @@ class GenerateBarcodes extends Command
         Storage::makeDirectory($root.'/EAN-13/PDF');
         Storage::makeDirectory($root.'/EAN-13/EPS');
 
+        // Create BarcodeJob record
+        $barcodeJob = BarcodeJob::create([
+            'order_no'   => $order,
+            'root'       => $root,
+            'started_at' => now(),
+            'total_jobs' => 0, // will update below
+        ]);
+
         // Chunk the range
         $chunkSize = (int) config('barcodes.chunk_size', 1000);
         $jobs = [];
+        $chunkIndex = 0;
         for ($cursor = $start; strcmp($cursor, $end) <= 0; $cursor = $this->inc($cursor, $chunkSize)) {
             $chunkEnd = $this->dec( min($this->add($cursor, $chunkSize), $this->add($end, 1)) );
-            $jobs[] = new RenderBarcodeChunk($cursor, $chunkEnd, $root, $order);
+            $jobs[] = new RenderBarcodeChunk($cursor, $chunkEnd, $root, $order, $barcodeJob->id, $chunkIndex++);
         }
+
+        // Update total_jobs count
+        $barcodeJob->update(['total_jobs' => count($jobs)]);
 
         Bus::batch($jobs)
             ->name("barcode-package-{$outBase}")
-            ->then(function (Batch $batch) use ($root, $order) {
-                FinalizeBarcodePackage::dispatch($root, $order)->onQueue(config('barcodes.queue', 'barcodes'));
+            ->then(function (Batch $batch) use ($root, $order, $barcodeJob) {
+                FinalizeBarcodePackage::dispatch($root, $order, $barcodeJob->id)->onQueue(config('barcodes.queue', 'barcodes'));
             })
             ->onQueue(config('barcodes.queue', 'barcodes'))
             ->dispatch();
