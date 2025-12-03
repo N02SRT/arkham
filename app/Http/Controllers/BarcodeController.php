@@ -309,6 +309,32 @@ class BarcodeController extends Controller
             ], 422);
         }
 
+        // If this order number has previous jobs, remove their files so the new request
+        // becomes the single source of truth for that order's package.
+        try {
+            $disk = Storage::disk(config('barcodes.disk', config('filesystems.default')));
+            $oldJobs = BarcodeJob::where('order_no', $data['order_no'])->get();
+            foreach ($oldJobs as $old) {
+                if ($old->root) {
+                    $disk->deleteDirectory($old->root);
+                }
+                if ($old->zip_rel_path) {
+                    $disk->delete($old->zip_rel_path);
+                }
+            }
+            if ($oldJobs->isNotEmpty()) {
+                Log::info('API: cleaned up old barcode files for existing order', [
+                    'order_no' => $data['order_no'],
+                    'jobs'     => $oldJobs->pluck('id'),
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('API: failed to clean up old files for existing order', [
+                'order_no' => $data['order_no'],
+                'error'    => $e->getMessage(),
+            ]);
+        }
+
         // output dirs
         $outBase = 'order-' . now()->format('Ymd-His') . '-' . Str::random(6);
         $root = "barcodes/{$outBase}";
