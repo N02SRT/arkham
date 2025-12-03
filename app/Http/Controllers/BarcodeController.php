@@ -315,13 +315,23 @@ class BarcodeController extends Controller
             $disk = Storage::disk(config('barcodes.disk', config('filesystems.default')));
             $oldJobs = BarcodeJob::where('order_no', $data['order_no'])->get();
             $deletedIds = [];
+            $deletedFiles = [];
             foreach ($oldJobs as $old) {
-                // Delete files
-                if ($old->root) {
-                    $disk->deleteDirectory($old->root);
-                }
-                if ($old->zip_rel_path) {
+                // Delete ZIP file first (if it exists)
+                if ($old->zip_rel_path && $disk->exists($old->zip_rel_path)) {
                     $disk->delete($old->zip_rel_path);
+                    $deletedFiles[] = $old->zip_rel_path;
+                }
+                // Delete directory tree
+                if ($old->root && $disk->exists($old->root)) {
+                    $disk->deleteDirectory($old->root);
+                    $deletedFiles[] = $old->root;
+                }
+                // Also try to delete ZIP by convention (in case zip_rel_path wasn't set)
+                $zipGuess = $old->root ? dirname($old->root) . '/' . basename($old->root) . '.zip' : null;
+                if ($zipGuess && $disk->exists($zipGuess)) {
+                    $disk->delete($zipGuess);
+                    $deletedFiles[] = $zipGuess;
                 }
                 // Delete the database record so the old job_id becomes invalid
                 $deletedIds[] = $old->id;
@@ -331,12 +341,14 @@ class BarcodeController extends Controller
                 Log::info('API: cleaned up old barcode files and deleted old job records for existing order', [
                     'order_no' => $data['order_no'],
                     'deleted_job_ids' => $deletedIds,
+                    'deleted_files' => $deletedFiles,
                 ]);
             }
         } catch (\Throwable $e) {
             Log::warning('API: failed to clean up old files/jobs for existing order', [
                 'order_no' => $data['order_no'],
                 'error'    => $e->getMessage(),
+                'trace'    => $e->getTraceAsString(),
             ]);
         }
 
@@ -575,6 +587,17 @@ class BarcodeController extends Controller
             'timestamp'  => now()->toISOString(),
         ]);
 
+        // Verify the job still exists and is valid (not deleted)
+        $freshJob = BarcodeJob::find($barcodeJob->id);
+        if (!$freshJob) {
+            Log::warning('API: Barcode job download failed - job was deleted', [
+                'ip'       => $req->ip(),
+                'job_id'   => $barcodeJob->id,
+                'order_no' => $barcodeJob->order_no,
+            ]);
+            abort(404, 'Job not found');
+        }
+
         if (!$barcodeJob->zip_rel_path || !Storage::exists($barcodeJob->zip_rel_path)) {
             Log::warning('API: Barcode job download failed - file not found', [
                 'ip'       => $req->ip(),
@@ -592,6 +615,7 @@ class BarcodeController extends Controller
             'job_id'   => $barcodeJob->id,
             'order_no' => $barcodeJob->order_no,
             'filename' => $name,
+            'zip_path' => $barcodeJob->zip_rel_path,
         ]);
 
         return response()->download(
