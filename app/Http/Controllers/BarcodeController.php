@@ -342,6 +342,11 @@ class BarcodeController extends Controller
                     'order_no' => $data['order_no'],
                     'deleted_job_ids' => $deletedIds,
                     'deleted_files' => $deletedFiles,
+                    'reason' => 'New request received for same order_no - old job replaced',
+                ]);
+            } else {
+                Log::info('API: no existing jobs found for order_no (first request)', [
+                    'order_no' => $data['order_no'],
                 ]);
             }
         } catch (\Throwable $e) {
@@ -485,9 +490,11 @@ class BarcodeController extends Controller
             'total_jobs'   => $batch->totalJobs,
             'start'        => $data['start'],
             'end'          => $data['end'],
+            'formats'      => $formats ?? 'defaults',
+            'new_job_id'   => $job->id, // IMPORTANT: This is the NEW job_id to use for downloads
         ]);
 
-        return response()->json([
+        $response = [
             'success' => true,
             'message' => 'Barcode job created successfully',
             'job' => [
@@ -501,7 +508,16 @@ class BarcodeController extends Controller
                 'status_url'     => route('api.barcodes.status', $job->id),
                 'download_url'   => null, // Will be available when job completes
             ],
-        ], 201);
+        ];
+        
+        Log::info('API: returning job creation response', [
+            'order_no' => $job->order_no,
+            'new_job_id' => $job->id,
+            'formats_requested' => $formats ?? 'defaults',
+            'warning' => 'IMPORTANT: Use this NEW job_id for all future requests. Old job_id is invalid.',
+        ]);
+        
+        return response()->json($response, 201);
     }
 
     /**
