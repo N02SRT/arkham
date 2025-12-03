@@ -269,7 +269,7 @@ class BarcodeController extends Controller
             'path'       => $req->path(),
             'ip'         => $req->ip(),
             'user_agent' => $req->userAgent(),
-            'request_data' => $req->only(['order_no', 'start', 'end']),
+            'request_data' => $req->only(['order_no', 'start', 'end', 'callback_url']),
             'timestamp'  => now()->toISOString(),
         ]);
 
@@ -278,12 +278,15 @@ class BarcodeController extends Controller
                 'order_no' => ['required', 'string', 'max:255'],
                 'start'    => ['required', 'regex:/^\d{11}$/'],
                 'end'      => ['required', 'regex:/^\d{11}$/'],
+                // Optional webhook back to the caller (e.g. Speedy)
+                'callback_url'   => ['nullable', 'url', 'max:2000'],
+                'callback_token' => ['nullable', 'string', 'max:255'],
             ]);
         } catch (\Illuminate\Validation\ValidationException $e) {
             Log::warning('API: Barcode job creation validation failed', [
                 'ip'         => $req->ip(),
                 'errors'     => $e->errors(),
-                'request_data' => $req->only(['order_no', 'start', 'end']),
+                'request_data' => $req->only(['order_no', 'start', 'end', 'callback_url']),
             ]);
             throw $e;
         }
@@ -315,6 +318,27 @@ class BarcodeController extends Controller
             'started_at' => now(),
             'total_jobs' => 0, // will fill below
         ]);
+
+        // Persist optional callback info so the finalizer can POST back when ready
+        $callbackUrl   = $data['callback_url']   ?? null;
+        $callbackToken = $data['callback_token'] ?? null;
+        if ($callbackUrl) {
+            $cbKey = "barcodes:callback:job:{$job->id}";
+            try {
+                Redis::hset($cbKey, 'url', $callbackUrl);
+                if ($callbackToken) {
+                    Redis::hset($cbKey, 'token', $callbackToken);
+                }
+                // keep callback metadata around for a few days
+                Redis::expire($cbKey, 3 * 86400);
+            } catch (\Throwable $e) {
+                Log::warning('API: failed to store callback metadata for barcode job', [
+                    'job_id'   => $job->id,
+                    'order_no' => $job->order_no,
+                    'error'    => $e->getMessage(),
+                ]);
+            }
+        }
 
         // chunking
         $chunkSize = (int) config('barcodes.chunk_size', 200);

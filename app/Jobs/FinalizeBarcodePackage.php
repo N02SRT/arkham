@@ -10,6 +10,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Http;
 
 class FinalizeBarcodePackage implements ShouldQueue
 {
@@ -96,6 +97,53 @@ class FinalizeBarcodePackage implements ShouldQueue
             if ($bj && $bj->total_jobs) {
                 Redis::hset($k, 'done', $bj->total_jobs);
                 Redis::expire($k, 86400);
+            }
+
+            // 6) Optional callback to upstream system (e.g. Speedy) when ready
+            $cbKey = "barcodes:callback:job:{$this->barcodeJobId}";
+            try {
+                $callbackUrl = Redis::hget($cbKey, 'url');
+                if ($callbackUrl) {
+                    $callbackToken = Redis::hget($cbKey, 'token') ?: null;
+
+                    $payload = [
+                        'job_id'       => $this->barcodeJobId,
+                        'order_no'     => $this->orderNo,
+                        'status'       => 'ready',
+                        'download_url' => route('api.barcodes.download', $this->barcodeJobId),
+                        'finished_at'  => $bj?->finished_at?->toISOString(),
+                    ];
+
+                    $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+
+                    // If a per-job callback token was provided, sign the payload with HMAC-SHA256
+                    $signature = null;
+                    if ($callbackToken) {
+                        $signature = hash_hmac('sha256', $json, $callbackToken);
+                    }
+
+                    $client = Http::timeout((int) config('barcodes.callback_timeout', 5));
+                    if ($signature) {
+                        $client = $client->withHeaders([
+                            'X-Arkham-Signature' => $signature,
+                        ]);
+                    }
+
+                    $response = $client->post($callbackUrl, $payload);
+
+                    Log::info('FinalizeBarcodePackage: callback invoked', [
+                        'jobRowId'    => $this->barcodeJobId,
+                        'order_no'    => $this->orderNo,
+                        'url'         => $callbackUrl,
+                        'status_code' => $response->status(),
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('FinalizeBarcodePackage: callback failed', [
+                    'jobRowId' => $this->barcodeJobId,
+                    'order_no' => $this->orderNo,
+                    'error'    => $e->getMessage(),
+                ]);
             }
 
             Log::info('FinalizeBarcodePackage: zip written', [
