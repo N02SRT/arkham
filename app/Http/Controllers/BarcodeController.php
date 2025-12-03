@@ -614,6 +614,28 @@ class BarcodeController extends Controller
             abort(404, 'Job not found');
         }
 
+        // Check if a newer job exists for this order_no (means this job was replaced)
+        $newerJob = BarcodeJob::where('order_no', $barcodeJob->order_no)
+            ->where('id', '!=', $barcodeJob->id)
+            ->where('started_at', '>', $barcodeJob->started_at)
+            ->first();
+        
+        if ($newerJob) {
+            Log::warning('API: Barcode job download failed - job was replaced by newer job', [
+                'ip'           => $req->ip(),
+                'old_job_id'   => $barcodeJob->id,
+                'new_job_id'   => $newerJob->id,
+                'order_no'     => $barcodeJob->order_no,
+                'message'      => 'This job was replaced. Use the new job_id: ' . $newerJob->id,
+            ]);
+            return response()->json([
+                'error' => 'Job replaced',
+                'message' => 'This job was replaced by a newer request. Please use the new job_id.',
+                'new_job_id' => $newerJob->id,
+                'new_download_url' => route('api.barcodes.download', $newerJob->id),
+            ], 410); // 410 Gone - resource was replaced
+        }
+
         if (!$barcodeJob->zip_rel_path || !Storage::exists($barcodeJob->zip_rel_path)) {
             Log::warning('API: Barcode job download failed - file not found', [
                 'ip'       => $req->ip(),
