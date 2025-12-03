@@ -270,7 +270,7 @@ class BarcodeController extends Controller
             'path'       => $req->path(),
             'ip'         => $req->ip(),
             'user_agent' => $req->userAgent(),
-            'request_data' => $req->only(['order_no', 'start', 'end', 'callback_url']),
+            'request_data' => $req->only(['order_no', 'start', 'end', 'callback_url', 'formats']),
             'timestamp'  => now()->toISOString(),
         ]);
 
@@ -381,9 +381,9 @@ class BarcodeController extends Controller
         // - JPG always on
         // - PDF/EPS controlled by barcodes.enable_pdf / barcodes.enable_eps
         $formats = $data['formats'] ?? null;
-        if (is_array($formats) && count($formats) > 0) {
-            $optKey = "barcodes:options:job:{$job->id}";
-            try {
+        $optKey = "barcodes:options:job:{$job->id}";
+        try {
+            if (is_array($formats) && count($formats) > 0) {
                 $jpg = in_array('jpg', $formats, true);
                 $pdf = in_array('pdf', $formats, true);
                 $eps = in_array('eps', $formats, true);
@@ -393,14 +393,23 @@ class BarcodeController extends Controller
                 Redis::hset($optKey, 'pdf', $pdf ? '1' : '0');
                 Redis::hset($optKey, 'eps', $eps ? '1' : '0');
                 Redis::hset($optKey, 'xls', $xls ? '1' : '0');
-                Redis::expire($optKey, 3 * 86400);
-            } catch (\Throwable $e) {
-                Log::warning('API: failed to store per-job format options', [
-                    'job_id'   => $job->id,
-                    'order_no' => $job->order_no,
-                    'error'    => $e->getMessage(),
-                ]);
+            } else {
+                // Defaults: JPG on, XLS on, PDF/EPS from config
+                Redis::hset($optKey, 'jpg', '1');
+                Redis::hset($optKey, 'xls', '1');
+                Redis::hset($optKey, 'pdf', config('barcodes.enable_pdf', false) ? '1' : '0');
+                Redis::hset($optKey, 'eps', config('barcodes.enable_eps', false) ? '1' : '0');
             }
+            // Store the start/end range so XLS can be generated without JPGs
+            Redis::hset($optKey, 'start', $data['start']);
+            Redis::hset($optKey, 'end', $data['end']);
+            Redis::expire($optKey, 3 * 86400);
+        } catch (\Throwable $e) {
+            Log::warning('API: failed to store per-job format options', [
+                'job_id'   => $job->id,
+                'order_no' => $job->order_no,
+                'error'    => $e->getMessage(),
+            ]);
         }
 
         // chunking

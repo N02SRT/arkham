@@ -207,12 +207,14 @@ class FinalizeBarcodePackage implements ShouldQueue
 
     /**
      * Produce a simple CSV (saved with .xls extension like the sample) for the UPCs we generated.
-     * We scan UPC-12/JPG and take codes from filenames "UPC-12-<12digits>.jpg".
+     * Can generate from numeric range (preferred) or by scanning JPG files (fallback).
      */
     private function writeUpcNumberListXls($disk, string $rootRel, string $orderNo): void
     {
         // Check per-job options to see if XLS is desired
         $optKey = "barcodes:options:job:{$this->barcodeJobId}";
+        $codes = [];
+        
         try {
             $xlsOpt = Redis::hget($optKey, 'xls');
             if ($xlsOpt === '0') {
@@ -222,34 +224,100 @@ class FinalizeBarcodePackage implements ShouldQueue
                 ]);
                 return;
             }
+            
+            // Try to get start/end range from Redis (preferred method)
+            $start = Redis::hget($optKey, 'start');
+            $end = Redis::hget($optKey, 'end');
+            
+            if ($start && $end && preg_match('/^\d{11}$/', $start) && preg_match('/^\d{11}$/', $end)) {
+                // Generate codes directly from the numeric range
+                for ($base = $start; strcmp($base, $end) <= 0; $base = $this->incBase($base)) {
+                    $codes[] = $this->makeUpc12($base);
+                }
+                Log::info('FinalizeBarcodePackage: generated XLS from numeric range', [
+                    'jobRowId' => $this->barcodeJobId,
+                    'start'    => $start,
+                    'end'      => $end,
+                    'count'    => count($codes),
+                ]);
+            } else {
+                // Fallback: scan JPG files if range not available
+                $jpgDirRel = $rootRel . '/UPC-12/JPG';
+                if ($disk->exists($jpgDirRel)) {
+                    $files = $disk->files($jpgDirRel);
+                    foreach ($files as $rel) {
+                        $bn = basename($rel);
+                        if (preg_match('/^UPC-12-(\d{12})\.jpg$/', $bn, $m)) {
+                            $codes[] = $m[1];
+                        }
+                    }
+                    sort($codes, SORT_STRING);
+                    Log::info('FinalizeBarcodePackage: generated XLS from JPG filenames (fallback)', [
+                        'jobRowId' => $this->barcodeJobId,
+                        'count'    => count($codes),
+                    ]);
+                }
+            }
         } catch (\Throwable $e) {
-            // If Redis unavailable, fall back to default behavior (generate XLS)
-            Log::warning('FinalizeBarcodePackage: failed to read XLS option; defaulting to enabled', [
+            // If Redis unavailable, fall back to scanning JPG files
+            Log::warning('FinalizeBarcodePackage: failed to read options; falling back to JPG scan', [
                 'jobRowId' => $this->barcodeJobId,
                 'error'    => $e->getMessage(),
             ]);
-        }
-
-        $jpgDirRel = $rootRel . '/UPC-12/JPG';
-        if (!$disk->exists($jpgDirRel)) {
-            return;
-        }
-
-        $files = $disk->files($jpgDirRel);
-        $codes = [];
-        foreach ($files as $rel) {
-            $bn = basename($rel);
-            if (preg_match('/^UPC-12-(\d{12})\.jpg$/', $bn, $m)) {
-                $codes[] = $m[1];
+            
+            $jpgDirRel = $rootRel . '/UPC-12/JPG';
+            if ($disk->exists($jpgDirRel)) {
+                $files = $disk->files($jpgDirRel);
+                foreach ($files as $rel) {
+                    $bn = basename($rel);
+                    if (preg_match('/^UPC-12-(\d{12})\.jpg$/', $bn, $m)) {
+                        $codes[] = $m[1];
+                    }
+                }
+                sort($codes, SORT_STRING);
             }
         }
-        sort($codes, SORT_STRING);
+
+        if (empty($codes)) {
+            Log::warning('FinalizeBarcodePackage: no UPC codes found for XLS generation', [
+                'jobRowId' => $this->barcodeJobId,
+                'root'     => $rootRel,
+            ]);
+            return;
+        }
 
         // CSV content with header
         $csv = "UPC-12\n" . implode("\n", $codes) . "\n";
         $xlsRel = $rootRel . '/UPC-12/UPC-12 XLS Number List - Order # ' . $orderNo . '.xls';
         $disk->put($xlsRel, $csv);
-        Log::info('FinalizeBarcodePackage: wrote UPC number list (xls-as-csv)', ['file' => $xlsRel]);
+        Log::info('FinalizeBarcodePackage: wrote UPC number list (xls-as-csv)', [
+            'file'  => $xlsRel,
+            'count' => count($codes),
+        ]);
+    }
+
+    /**
+     * Build 12-digit UPC-A from 11-digit base (same algorithm as UpcRasterRenderer).
+     */
+    private function makeUpc12(string $base11): string
+    {
+        if (!preg_match('/^\d{11}$/', $base11)) {
+            throw new \InvalidArgumentException('UPC base must be exactly 11 digits.');
+        }
+        $d = array_map('intval', str_split($base11));
+        $sumOdd  = $d[0]+$d[2]+$d[4]+$d[6]+$d[8]+$d[10];
+        $sumEven = $d[1]+$d[3]+$d[5]+$d[7]+$d[9];
+        $check = (10 - ((($sumOdd * 3) + $sumEven) % 10)) % 10;
+        return $base11 . $check;
+    }
+
+    /**
+     * Increment an 11-digit base string by 1 (preserving zero padding).
+     */
+    private function incBase(string $base11): string
+    {
+        $n = (int) $base11 + 1;
+        return str_pad((string)$n, 11, '0', STR_PAD_LEFT);
     }
 
     /**
