@@ -127,7 +127,9 @@ class VectorBarcodeRenderer
      */
     private function pdfHriCommandsJpg(string $type, string $digits, float $quietX, float $barsW, float $padTop, float $barsH): string
     {
-        $baselineY = $padTop + $barsH + self::GAP_BARS_TX_PT;
+        // PDF coordinate system: (0,0) is bottom-left, so we need to flip Y coordinates
+        $baselineYFromTop = $padTop + $barsH + self::GAP_BARS_TX_PT;
+        $baselineYFromBottom = self::HEIGHT_PT - $baselineYFromTop;
         $halfW = $barsW / 2.0;
         $fontKey = '/F1';
         $fontSize = self::FONT_SIZE_PT;
@@ -144,19 +146,19 @@ class VectorBarcodeRenderer
             
             // Left single digit - centered in left quiet zone
             $xLead = $quietX / 2 - $cw / 2;
-            $s .= $this->pdfTm($xLead, $baselineY) . "({$lead}) Tj ";
+            $s .= $this->pdfTm($xLead, $baselineYFromBottom) . "({$lead}) Tj ";
             
             // Left group - centered under left half
             $xLeft = $quietX + ($halfW / 2) - (strlen($left) * $cw / 2);
-            $s .= $this->pdfTm($xLeft, $baselineY) . "({$left}) Tj ";
+            $s .= $this->pdfTm($xLeft, $baselineYFromBottom) . "({$left}) Tj ";
             
             // Right group - centered under right half
             $xRight = $quietX + $halfW + ($halfW / 2) - (strlen($right) * $cw / 2);
-            $s .= $this->pdfTm($xRight, $baselineY) . "({$right}) Tj ";
+            $s .= $this->pdfTm($xRight, $baselineYFromBottom) . "({$right}) Tj ";
             
             // Right single digit - centered in right quiet zone
             $xChk = self::WIDTH_PT - $quietX / 2 - $cw / 2;
-            $s .= $this->pdfTm($xChk, $baselineY) . "({$chk}) Tj ";
+            $s .= $this->pdfTm($xChk, $baselineYFromBottom) . "({$chk}) Tj ";
             
         } elseif ($type === 'ean13' && strlen($digits) === 13) {
             $d = str_split($digits);
@@ -166,15 +168,15 @@ class VectorBarcodeRenderer
             
             // Left single digit - centered in left quiet zone
             $xLead = $quietX / 2 - $cw / 2;
-            $s .= $this->pdfTm($xLead, $baselineY) . "({$lead}) Tj ";
+            $s .= $this->pdfTm($xLead, $baselineYFromBottom) . "({$lead}) Tj ";
             
             // Left 6 digits - centered under left half
             $xLeft = $quietX + ($halfW / 2) - (strlen($left6) * $cw / 2);
-            $s .= $this->pdfTm($xLeft, $baselineY) . "({$left6}) Tj ";
+            $s .= $this->pdfTm($xLeft, $baselineYFromBottom) . "({$left6}) Tj ";
             
             // Right 6 digits - centered under right half
             $xRight = $quietX + $halfW + ($halfW / 2) - (strlen($right6) * $cw / 2);
-            $s .= $this->pdfTm($xRight, $baselineY) . "({$right6}) Tj ";
+            $s .= $this->pdfTm($xRight, $baselineYFromBottom) . "({$right6}) Tj ";
         }
         
         $s .= "ET\n";
@@ -253,6 +255,7 @@ class VectorBarcodeRenderer
         $guardIdx = $this->guardModuleIndices();
         
         // Bars as rectangles
+        // PDF coordinate system: (0,0) is bottom-left, so we need to flip Y coordinates
         $x = $matchJpg ? $quietX : ($quietMods * $modulePt);
         $bars = "0 g\n"; // fill black
         for ($i=0; $i<$mods; ) {
@@ -267,7 +270,9 @@ class VectorBarcodeRenderer
                     $barH += $guardExtra;
                 }
                 
-                $bars .= sprintf("%.3f %.3f %.3f %.3f re f\n", $x, $barStartY, $w, $barH);
+                // Flip Y: if bar starts at $barStartY from top, it's at ($height - $barStartY - $barH) from bottom
+                $yFromBottom = $height - $barStartY - $barH;
+                $bars .= sprintf("%.3f %.3f %.3f %.3f re f\n", $x, $yFromBottom, $w, $barH);
                 $x += $w; $i += $run;
             } else {
                 $x += $module; $i++;
