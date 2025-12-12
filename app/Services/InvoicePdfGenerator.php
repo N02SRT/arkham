@@ -60,14 +60,33 @@ class InvoicePdfGenerator
             Log::error('InvoicePdfGenerator: system temp directory not writable', ['temp_dir' => $tempDir]);
             throw new \RuntimeException("System temp directory not writable: {$tempDir}");
         }
-
-        Log::info('InvoicePdfGenerator: creating TCPDF instance');
+        
+        // Set a timeout for TCPDF instantiation (30 seconds)
+        $startTime = microtime(true);
+        $timeout = 30;
+        set_time_limit($timeout + 5); // Add buffer
+        
+        Log::info('InvoicePdfGenerator: creating TCPDF instance', [
+            'timeout' => $timeout,
+            'temp_dir' => $tempDir,
+            'fonts_dir' => $fontsDir,
+            'cache_dir' => $cacheDir,
+        ]);
+        
         try {
             $pdf = new TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
-            Log::info('InvoicePdfGenerator: TCPDF instance created');
+            
+            $elapsed = microtime(true) - $startTime;
+            if ($elapsed > $timeout) {
+                throw new \RuntimeException("TCPDF instantiation took too long: {$elapsed}s");
+            }
+            
+            Log::info('InvoicePdfGenerator: TCPDF instance created', ['elapsed' => round($elapsed, 3)]);
         } catch (\Throwable $e) {
+            $elapsed = microtime(true) - $startTime;
             Log::error('InvoicePdfGenerator: failed to create TCPDF instance', [
                 'error' => $e->getMessage(),
+                'elapsed' => round($elapsed, 3),
                 'trace' => $e->getTraceAsString(),
             ]);
             throw $e;
