@@ -139,7 +139,7 @@ class VectorBarcodeRenderer
         // Text box top (from JPG calculation)
         $textBoxTopFromTop = $barsEndFromTop + self::GAP_BARS_TX_PT;
         // Position text baseline in bottom portion of TEXT_H area (around 70% down) to ensure it's clearly below bars
-        $textBaselineFromTop = $textBoxTopFromTop + (self::TEXT_H_PT * 0.7);
+        $textBaselineFromTop = $textBoxTopFromTop + (self::TEXT_H_PT * 0.6);
         // Convert to bottom-based coordinates for PDF
         $baselineYFromBottom = self::HEIGHT_PT - $textBaselineFromTop;
         
@@ -513,7 +513,7 @@ class VectorBarcodeRenderer
         $barsEndFromTop = $padTop + $barsH;
         $textBoxTopFromTop = $barsEndFromTop + self::GAP_BARS_TX_PT;
         // Position text baseline in bottom portion of TEXT_H area (around 70% down)
-        $textBaselineFromTop = $textBoxTopFromTop + (self::TEXT_H_PT * 0.7);
+        $textBaselineFromTop = $textBoxTopFromTop + (self::TEXT_H_PT * 0.6);
         $baselineY = self::HEIGHT_PT - $textBaselineFromTop;
         $halfW = $barsW / 2.0;
         $fontSize = self::FONT_SIZE_PT;
