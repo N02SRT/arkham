@@ -128,8 +128,16 @@ class VectorBarcodeRenderer
     private function pdfHriCommandsJpg(string $type, string $digits, float $quietX, float $barsW, float $padTop, float $barsH): string
     {
         // PDF coordinate system: (0,0) is bottom-left, so we need to flip Y coordinates
+        // Match JPG: baselineY = PAD_TOP + barsH + GAP_BARS_TX
+        // In JPG: baselineY is calculated from top, then used as yTop for ttfCenteredBox
+        // The ttfCenteredBox centers text vertically within TEXT_H, so actual text Y is baselineY + (TEXT_H - textH) / 2 + baselineOffset
+        // For simplicity, position text lower by reducing Y from bottom
         $baselineYFromTop = $padTop + $barsH + self::GAP_BARS_TX_PT;
-        $baselineYFromBottom = self::HEIGHT_PT - $baselineYFromTop;
+        // Lower text by positioning it further down (smaller Y from bottom in PDF)
+        // Account for text height - position at bottom of text area
+        $textAreaBottom = self::HEIGHT_PT - self::TEXT_H_PT;
+        $baselineYFromBottom = $textAreaBottom + (self::TEXT_H_PT * 0.3); // Position in lower portion of text area
+        
         $halfW = $barsW / 2.0;
         $fontKey = '/F1';
         $fontSize = self::FONT_SIZE_PT;
@@ -144,20 +152,24 @@ class VectorBarcodeRenderer
             $right = implode('', array_slice($d, 6, 5));
             $chk = $d[11];
             
-            // Left single digit - centered in left quiet zone
-            $xLead = $quietX / 2 - $cw / 2;
+            // Left single digit - centered in left quiet zone (x=0, width=QUIET_X, centered)
+            // JPG: ttfCenteredBox(im, ttf, size, color, 0, baselineY, QUIET_X, TEXT_H, lead, 'C')
+            $xLead = ($quietX / 2) - ($cw / 2);
             $s .= $this->pdfTm($xLead, $baselineYFromBottom) . "({$lead}) Tj ";
             
-            // Left group - centered under left half
+            // Left group - centered under left half (x=QUIET_X, width=halfW, centered)
+            // JPG: ttfCenteredBox(im, ttf, size, color, QUIET_X, baselineY, halfW, TEXT_H, left, 'C')
             $xLeft = $quietX + ($halfW / 2) - (strlen($left) * $cw / 2);
             $s .= $this->pdfTm($xLeft, $baselineYFromBottom) . "({$left}) Tj ";
             
-            // Right group - centered under right half
+            // Right group - centered under right half (x=QUIET_X+halfW, width=halfW, centered)
+            // JPG: ttfCenteredBox(im, ttf, size, color, QUIET_X+halfW, baselineY, halfW, TEXT_H, right, 'C')
             $xRight = $quietX + $halfW + ($halfW / 2) - (strlen($right) * $cw / 2);
             $s .= $this->pdfTm($xRight, $baselineYFromBottom) . "({$right}) Tj ";
             
-            // Right single digit - centered in right quiet zone
-            $xChk = self::WIDTH_PT - $quietX / 2 - $cw / 2;
+            // Right single digit - centered in right quiet zone (x=WIDTH-QUIET_X, width=QUIET_X, centered)
+            // JPG: ttfCenteredBox(im, ttf, size, color, WIDTH-QUIET_X, baselineY, QUIET_X, TEXT_H, chk, 'C')
+            $xChk = (self::WIDTH_PT - $quietX) + ($quietX / 2) - ($cw / 2);
             $s .= $this->pdfTm($xChk, $baselineYFromBottom) . "({$chk}) Tj ";
             
         } elseif ($type === 'ean13' && strlen($digits) === 13) {
@@ -491,7 +503,10 @@ class VectorBarcodeRenderer
      */
     private function epsHriCommandsJpg(string $type, string $digits, float $quietX, float $barsW, float $padTop, float $barsH): string
     {
-        $baselineY = $padTop + $barsH + self::GAP_BARS_TX_PT;
+        // EPS coordinate system: (0,0) is bottom-left (same as PDF)
+        // Match JPG positioning - lower text in the text area
+        $textAreaBottom = self::HEIGHT_PT - self::TEXT_H_PT;
+        $baselineY = $textAreaBottom + (self::TEXT_H_PT * 0.3); // Position in lower portion of text area
         $halfW = $barsW / 2.0;
         $fontSize = self::FONT_SIZE_PT;
         $cw = 0.60 * $fontSize;
@@ -505,20 +520,20 @@ class VectorBarcodeRenderer
             $right = implode('', array_slice($d, 6, 5));
             $chk = $d[11];
             
-            // Left single digit
-            $xLead = $quietX / 2 - $cw / 2;
+            // Left single digit - centered in left quiet zone (x=0, width=QUIET_X, centered)
+            $xLead = ($quietX / 2) - ($cw / 2);
             $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xLead, $baselineY, $lead);
             
-            // Left group
+            // Left group - centered under left half (x=QUIET_X, width=halfW, centered)
             $xLeft = $quietX + ($halfW / 2) - (strlen($left) * $cw / 2);
             $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xLeft, $baselineY, $left);
             
-            // Right group
+            // Right group - centered under right half (x=QUIET_X+halfW, width=halfW, centered)
             $xRight = $quietX + $halfW + ($halfW / 2) - (strlen($right) * $cw / 2);
             $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xRight, $baselineY, $right);
             
-            // Right single digit
-            $xChk = self::WIDTH_PT - $quietX / 2 - $cw / 2;
+            // Right single digit - centered in right quiet zone (x=WIDTH-QUIET_X, width=QUIET_X, centered)
+            $xChk = (self::WIDTH_PT - $quietX) + ($quietX / 2) - ($cw / 2);
             $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xChk, $baselineY, $chk);
             
         } elseif ($type === 'ean13' && strlen($digits) === 13) {
@@ -527,15 +542,15 @@ class VectorBarcodeRenderer
             $left6 = implode('', array_slice($d, 1, 6));
             $right6 = implode('', array_slice($d, 7, 6));
             
-            // Left single digit
-            $xLead = $quietX / 2 - $cw / 2;
+            // Left single digit - centered in left quiet zone
+            $xLead = ($quietX / 2) - ($cw / 2);
             $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xLead, $baselineY, $lead);
             
-            // Left 6 digits
+            // Left 6 digits - centered under left half
             $xLeft = $quietX + ($halfW / 2) - (strlen($left6) * $cw / 2);
             $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xLeft, $baselineY, $left6);
             
-            // Right 6 digits
+            // Right 6 digits - centered under right half
             $xRight = $quietX + $halfW + ($halfW / 2) - (strlen($right6) * $cw / 2);
             $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xRight, $baselineY, $right6);
         }
