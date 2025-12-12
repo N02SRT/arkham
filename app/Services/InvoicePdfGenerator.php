@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\File;
 use TCPDF;
 
 class InvoicePdfGenerator
@@ -20,6 +21,17 @@ class InvoicePdfGenerator
         Log::info('InvoicePdfGenerator: starting generation', ['path' => $pdfAbs]);
         
         @mkdir(dirname($pdfAbs), 0775, true);
+
+        // Ensure TCPDF constants and directories are set up
+        Log::info('InvoicePdfGenerator: setting up TCPDF constants');
+        if (!defined('K_PATH_FONTS')) {
+            define('K_PATH_FONTS', storage_path('tcpdf-fonts') . '/');
+        }
+        if (!defined('K_PATH_CACHE')) {
+            define('K_PATH_CACHE', storage_path('framework/cache/tcpdf') . '/');
+        }
+        File::ensureDirectoryExists(storage_path('tcpdf-fonts'));
+        File::ensureDirectoryExists(storage_path('framework/cache/tcpdf'));
 
         Log::info('InvoicePdfGenerator: creating TCPDF instance');
         try {

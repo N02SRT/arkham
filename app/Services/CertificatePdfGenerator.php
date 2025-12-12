@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\File;
 use TCPDF;
 
 class CertificatePdfGenerator
@@ -18,6 +19,16 @@ class CertificatePdfGenerator
     public function generate(string $pdfAbs, string $name, string $orderNo, array $barcodes = []): void
     {
         @mkdir(dirname($pdfAbs), 0775, true);
+
+        // Ensure TCPDF constants and directories are set up
+        if (!defined('K_PATH_FONTS')) {
+            define('K_PATH_FONTS', storage_path('tcpdf-fonts') . '/');
+        }
+        if (!defined('K_PATH_CACHE')) {
+            define('K_PATH_CACHE', storage_path('framework/cache/tcpdf') . '/');
+        }
+        File::ensureDirectoryExists(storage_path('tcpdf-fonts'));
+        File::ensureDirectoryExists(storage_path('framework/cache/tcpdf'));
 
         $pdf = new TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
         $pdf->setPrintHeader(false);
