@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\Log;
 use TCPDF;
 
 class CertificatePdfGenerator
@@ -81,7 +82,41 @@ class CertificatePdfGenerator
         $pdf->Cell(0, 6, 'Order Number: ' . $orderNo, 0, 1, 'R');
         $pdf->Cell(80, 6, 'Authorized Signature', 0, 1, 'L');
 
-        $pdf->Output($pdfAbs, 'F');
+        // Ensure directory exists and is writable
+        $dir = dirname($pdfAbs);
+        if (!is_dir($dir)) {
+            if (!@mkdir($dir, 0775, true)) {
+                throw new \RuntimeException("Failed to create directory: {$dir}");
+            }
+        }
+        if (!is_writable($dir)) {
+            throw new \RuntimeException("Directory is not writable: {$dir}");
+        }
+
+        // Write PDF with error handling
+        try {
+            Log::info('CertificatePdfGenerator: about to call Output()', ['path' => $pdfAbs]);
+            ob_start();
+            $pdf->Output($pdfAbs, 'F');
+            $output = ob_get_clean();
+            if ($output) {
+                Log::warning('CertificatePdfGenerator: TCPDF generated output', ['output' => $output]);
+            }
+            Log::info('CertificatePdfGenerator: Output() completed', ['path' => $pdfAbs, 'size' => file_exists($pdfAbs) ? filesize($pdfAbs) : 0]);
+        } catch (\Throwable $e) {
+            if (file_exists($pdfAbs)) {
+                @unlink($pdfAbs);
+            }
+            throw new \RuntimeException("Failed to write certificate PDF: " . $e->getMessage(), 0, $e);
+        }
+        
+        // Verify file was created
+        if (!file_exists($pdfAbs) || filesize($pdfAbs) === 0) {
+            if (file_exists($pdfAbs)) {
+                @unlink($pdfAbs);
+            }
+            throw new \RuntimeException("Certificate PDF was not created or is empty: {$pdfAbs}");
+        }
     }
 }
 

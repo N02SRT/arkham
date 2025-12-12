@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\Log;
 use TCPDF;
 
 class InvoicePdfGenerator
@@ -184,8 +185,28 @@ class InvoicePdfGenerator
         $pdf->Cell(155, 8, 'Credit Card Payment:', 0, 0, 'R');
         $pdf->Cell(30, 8, '$' . number_format((float)$total, 2) . ' USD', 1, 1, 'R');
 
+        // Ensure directory exists and is writable
+        $dir = dirname($pdfAbs);
+        if (!is_dir($dir)) {
+            if (!@mkdir($dir, 0775, true)) {
+                throw new \RuntimeException("Failed to create directory: {$dir}");
+            }
+        }
+        if (!is_writable($dir)) {
+            throw new \RuntimeException("Directory is not writable: {$dir}");
+        }
+
+        // Write PDF with error handling
         try {
+            Log::info('InvoicePdfGenerator: about to call Output()', ['path' => $pdfAbs]);
+            // Suppress any output that TCPDF might generate
+            ob_start();
             $pdf->Output($pdfAbs, 'F');
+            $output = ob_get_clean();
+            if ($output) {
+                Log::warning('InvoicePdfGenerator: TCPDF generated output', ['output' => $output]);
+            }
+            Log::info('InvoicePdfGenerator: Output() completed', ['path' => $pdfAbs, 'size' => file_exists($pdfAbs) ? filesize($pdfAbs) : 0]);
         } catch (\Throwable $e) {
             // Clean up partial file if it exists
             if (file_exists($pdfAbs)) {
@@ -195,8 +216,12 @@ class InvoicePdfGenerator
         }
         
         // Verify file was created
-        if (!file_exists($pdfAbs) || filesize($pdfAbs) === 0) {
-            throw new \RuntimeException("Invoice PDF was not created or is empty: {$pdfAbs}");
+        if (!file_exists($pdfAbs)) {
+            throw new \RuntimeException("Invoice PDF file was not created: {$pdfAbs}");
+        }
+        if (filesize($pdfAbs) === 0) {
+            @unlink($pdfAbs);
+            throw new \RuntimeException("Invoice PDF file is empty: {$pdfAbs}");
         }
     }
 
