@@ -4,6 +4,17 @@ namespace App\Services;
 
 class VectorBarcodeRenderer
 {
+    // Match JPG format dimensions (460x300px @ 300 DPI converted to points)
+    // JPG: 460x300 px @ 300 DPI = 110.4 x 72 pt
+    private const WIDTH_PT   = 110.4;  // 460px @ 300 DPI
+    private const HEIGHT_PT  = 72.0;   // 300px @ 300 DPI
+    private const QUIET_X_PT = 10.08;  // 42px quiet zone
+    private const PAD_TOP_PT = 2.88;   // 12px top padding
+    private const TEXT_H_PT  = 17.28;  // 72px text height
+    private const GAP_BARS_TX_PT = -2.4; // -10px gap (negative means overlap)
+    private const FONT_SIZE_PT = 8.16; // 34pt font scaled
+    private const GUARD_EXTRA_PT = 1.44; // 6px extra for guard bars
+
     // EAN-13 encode maps
     private array $L = [
         '0'=>'0001101','1'=>'0011001','2'=>'0010011','3'=>'0111101','4'=>'0100011',
@@ -23,45 +34,13 @@ class VectorBarcodeRenderer
     ];
 
     // ---------- Public API (vector with HRI digits) ----------
-
-    public function renderPdfEan13(
-        string $ean13, string $pdfAbs,
-        float $modulePt = 1.0, float $barHpt = 50.0, int $quietMods = 11,
-        bool $withText = true, string $fontName = 'Helvetica', float $fontPt = 10.0, float $textGapPt = 2.0
-    ): void {
-        $pattern = $this->ean13Pattern($ean13);
-        $this->writePdfFromPattern($pattern, $pdfAbs, $modulePt, $barHpt, $quietMods, [
-            'type'     => 'ean13',
-            'digits'   => $ean13,
-            'font'     => $fontName,
-            'fontPt'   => $fontPt,
-            'gapPt'    => $textGapPt,
-            'enabled'  => $withText,
-        ]);
-    }
-
-    public function renderEpsEan13(
-        string $ean13, string $epsAbs,
-        float $modulePt = 1.0, float $barHpt = 50.0, int $quietMods = 11,
-        bool $withText = true, string $fontName = 'Helvetica', float $fontPt = 10.0, float $textGapPt = 2.0
-    ): void {
-        $pattern = $this->ean13Pattern($ean13);
-        $this->writeEpsFromPattern($pattern, $epsAbs, $modulePt, $barHpt, $quietMods, [
-            'type'     => 'ean13',
-            'digits'   => $ean13,
-            'font'     => $fontName,
-            'fontPt'   => $fontPt,
-            'gapPt'    => $textGapPt,
-            'enabled'  => $withText,
-        ]);
-    }
-
     // UPC-A (12) is EAN-13 with leading 0 for bars; HRI is 12 digits laid out as UPC
     public function renderPdfUpc12(
         string $upc12, string $pdfAbs,
         float $modulePt = 1.0, float $barHpt = 50.0, int $quietMods = 11,
         bool $withText = true, string $fontName = 'Helvetica', float $fontPt = 10.0, float $textGapPt = 2.0
     ): void {
+        // Use fixed dimensions to match JPG format
         $pattern = $this->ean13Pattern('0'.$upc12); // bars
         $this->writePdfFromPattern($pattern, $pdfAbs, $modulePt, $barHpt, $quietMods, [
             'type'     => 'upca',
@@ -70,6 +49,7 @@ class VectorBarcodeRenderer
             'fontPt'   => $fontPt,
             'gapPt'    => $textGapPt,
             'enabled'  => $withText,
+            'match_jpg' => true, // Flag to use JPG-matching dimensions
         ]);
     }
 
@@ -78,6 +58,7 @@ class VectorBarcodeRenderer
         float $modulePt = 1.0, float $barHpt = 50.0, int $quietMods = 11,
         bool $withText = true, string $fontName = 'Helvetica', float $fontPt = 10.0, float $textGapPt = 2.0
     ): void {
+        // Use fixed dimensions to match JPG format
         $pattern = $this->ean13Pattern('0'.$upc12); // bars
         $this->writeEpsFromPattern($pattern, $epsAbs, $modulePt, $barHpt, $quietMods, [
             'type'     => 'upca',
@@ -86,7 +67,118 @@ class VectorBarcodeRenderer
             'fontPt'   => $fontPt,
             'gapPt'    => $textGapPt,
             'enabled'  => $withText,
+            'match_jpg' => true, // Flag to use JPG-matching dimensions
         ]);
+    }
+
+    public function renderPdfEan13(
+        string $ean13, string $pdfAbs,
+        float $modulePt = 1.0, float $barHpt = 50.0, int $quietMods = 11,
+        bool $withText = true, string $fontName = 'Helvetica', float $fontPt = 10.0, float $textGapPt = 2.0
+    ): void {
+        // Use fixed dimensions to match JPG format
+        $pattern = $this->ean13Pattern($ean13);
+        $this->writePdfFromPattern($pattern, $pdfAbs, $modulePt, $barHpt, $quietMods, [
+            'type'     => 'ean13',
+            'digits'   => $ean13,
+            'font'     => $fontName,
+            'fontPt'   => $fontPt,
+            'gapPt'    => $textGapPt,
+            'enabled'  => $withText,
+            'match_jpg' => true, // Flag to use JPG-matching dimensions
+        ]);
+    }
+
+    public function renderEpsEan13(
+        string $ean13, string $epsAbs,
+        float $modulePt = 1.0, float $barHpt = 50.0, int $quietMods = 11,
+        bool $withText = true, string $fontName = 'Helvetica', float $fontPt = 10.0, float $textGapPt = 2.0
+    ): void {
+        // Use fixed dimensions to match JPG format
+        $pattern = $this->ean13Pattern($ean13);
+        $this->writeEpsFromPattern($pattern, $epsAbs, $modulePt, $barHpt, $quietMods, [
+            'type'     => 'ean13',
+            'digits'   => $ean13,
+            'font'     => $fontName,
+            'fontPt'   => $fontPt,
+            'gapPt'    => $textGapPt,
+            'enabled'  => $withText,
+            'match_jpg' => true, // Flag to use JPG-matching dimensions
+        ]);
+    }
+
+    /**
+     * Module indices that belong to guard bars (to extend them visually).
+     */
+    private function guardModuleIndices(): array
+    {
+        // start guard:   0..2
+        // center guard:  45..49
+        // end guard:     92..94
+        $idx = [];
+        for ($i = 0; $i <= 2; $i++)   $idx[$i] = true;
+        for ($i = 45; $i <= 49; $i++) $idx[$i] = true;
+        for ($i = 92; $i <= 94; $i++) $idx[$i] = true;
+        return $idx;
+    }
+
+    /**
+     * Generate PDF HRI commands matching JPG format layout.
+     */
+    private function pdfHriCommandsJpg(string $type, string $digits, float $quietX, float $barsW, float $padTop, float $barsH): string
+    {
+        $baselineY = $padTop + $barsH + self::GAP_BARS_TX_PT;
+        $halfW = $barsW / 2.0;
+        $fontKey = '/F1';
+        $fontSize = self::FONT_SIZE_PT;
+        $cw = 0.60 * $fontSize; // approximate character width
+        
+        $s = "BT {$fontKey} {$fontSize} Tf ";
+        
+        if ($type === 'upca' && strlen($digits) === 12) {
+            $d = str_split($digits);
+            $lead = $d[0];
+            $left = implode('', array_slice($d, 1, 5));
+            $right = implode('', array_slice($d, 6, 5));
+            $chk = $d[11];
+            
+            // Left single digit - centered in left quiet zone
+            $xLead = $quietX / 2 - $cw / 2;
+            $s .= $this->pdfTm($xLead, $baselineY) . "({$lead}) Tj ";
+            
+            // Left group - centered under left half
+            $xLeft = $quietX + ($halfW / 2) - (strlen($left) * $cw / 2);
+            $s .= $this->pdfTm($xLeft, $baselineY) . "({$left}) Tj ";
+            
+            // Right group - centered under right half
+            $xRight = $quietX + $halfW + ($halfW / 2) - (strlen($right) * $cw / 2);
+            $s .= $this->pdfTm($xRight, $baselineY) . "({$right}) Tj ";
+            
+            // Right single digit - centered in right quiet zone
+            $xChk = self::WIDTH_PT - $quietX / 2 - $cw / 2;
+            $s .= $this->pdfTm($xChk, $baselineY) . "({$chk}) Tj ";
+            
+        } elseif ($type === 'ean13' && strlen($digits) === 13) {
+            $d = str_split($digits);
+            $lead = $d[0];
+            $left6 = implode('', array_slice($d, 1, 6));
+            $right6 = implode('', array_slice($d, 7, 6));
+            
+            // Left single digit - centered in left quiet zone
+            $xLead = $quietX / 2 - $cw / 2;
+            $s .= $this->pdfTm($xLead, $baselineY) . "({$lead}) Tj ";
+            
+            // Left 6 digits - centered under left half
+            $xLeft = $quietX + ($halfW / 2) - (strlen($left6) * $cw / 2);
+            $s .= $this->pdfTm($xLeft, $baselineY) . "({$left6}) Tj ";
+            
+            // Right 6 digits - centered under right half
+            $xRight = $quietX + $halfW + ($halfW / 2) - (strlen($right6) * $cw / 2);
+            $s .= $this->pdfTm($xRight, $baselineY) . "({$right6}) Tj ";
+        }
+        
+        $s .= "ET\n";
+        return $s;
     }
 
     // ---------- Pattern builder ----------
@@ -126,45 +218,87 @@ class VectorBarcodeRenderer
     private function writePdfFromPattern(
         string $pattern, string $pdfAbs,
         float $modulePt, float $barHpt, int $quietMods,
-        array $hri // ['enabled'=>bool,'type'=>'ean13'|'upca','digits'=>string,'font'=>string,'fontPt'=>float,'gapPt'=>float]
+        array $hri // ['enabled'=>bool,'type'=>'ean13'|'upca','digits'=>string,'font'=>string,'fontPt'=>float,'gapPt'=>float,'match_jpg'=>bool]
     ): void {
         @mkdir(dirname($pdfAbs), 0775, true);
 
         $mods = strlen($pattern); // 95
-        $textBlock = (!empty($hri['enabled'])) ? ($hri['fontPt'] + $hri['gapPt']) : 0.0;
-        $width  = ($mods + 2*$quietMods) * $modulePt;
-        $height = $barHpt + $textBlock;
+        $matchJpg = !empty($hri['match_jpg']);
+        
+        if ($matchJpg) {
+            // Match JPG format exactly: 460x300px @ 300 DPI = 110.4 x 72 pt
+            $width = self::WIDTH_PT;
+            $height = self::HEIGHT_PT;
+            $quietX = self::QUIET_X_PT;
+            $padTop = self::PAD_TOP_PT;
+            $textH = self::TEXT_H_PT;
+            $barsW = $width - 2 * $quietX;
+            $barsH = $height - $padTop - $textH;
+            $module = $barsW / 95.0; // 95 modules
+            $barStartY = $padTop;
+            $guardExtra = self::GUARD_EXTRA_PT;
+        } else {
+            // Original logic
+            $textBlock = (!empty($hri['enabled'])) ? ($hri['fontPt'] + $hri['gapPt']) : 0.0;
+            $width  = ($mods + 2*$quietMods) * $modulePt;
+            $height = $barHpt + $textBlock;
+            $quietX = $quietMods * $modulePt;
+            $module = $modulePt;
+            $barStartY = $textBlock;
+            $barsH = $barHpt;
+            $guardExtra = 0;
+        }
 
-        // Bars as rectangles; start at y = $textBlock to leave room for HRI
-        $x = $quietMods * $modulePt;
+        // Get guard bar indices
+        $guardIdx = $this->guardModuleIndices();
+        
+        // Bars as rectangles
+        $x = $matchJpg ? $quietX : ($quietMods * $modulePt);
         $bars = "0 g\n"; // fill black
         for ($i=0; $i<$mods; ) {
             if ($pattern[$i] === '1') {
                 $run = 0;
                 while ($i+$run < $mods && $pattern[$i+$run] === '1') { $run++; }
-                $w = $run * $modulePt;
-                $bars .= sprintf("%.3f %.3f %.3f %.3f re f\n", $x, $textBlock, $w, $barHpt);
+                $w = $run * $module;
+                $barH = $barsH;
+                
+                // Extend guard bars if match_jpg is enabled
+                if ($matchJpg && isset($guardIdx[$i])) {
+                    $barH += $guardExtra;
+                }
+                
+                $bars .= sprintf("%.3f %.3f %.3f %.3f re f\n", $x, $barStartY, $w, $barH);
                 $x += $w; $i += $run;
             } else {
-                $x += $modulePt; $i++;
+                $x += $module; $i++;
             }
         }
 
         // Optional HRI (Helvetica – no embedding)
         $text = '';
-        $fontName = $hri['font'] ?? 'Helvetica';
-        $fontPt   = (float)($hri['fontPt'] ?? 10.0);
         if (!empty($hri['enabled'])) {
-            $text .= $this->pdfHriCommands(
-                $hri['type'], $hri['digits'],
-                $quietMods, $modulePt, $mods,
-                $fontPt, (float)($hri['gapPt'] ?? 2.0)
-            );
+            if ($matchJpg) {
+                // Use JPG-matching text layout
+                $text .= $this->pdfHriCommandsJpg(
+                    $hri['type'], $hri['digits'],
+                    $quietX, $barsW, $padTop, $barsH
+                );
+            } else {
+                // Original layout
+                $fontName = $hri['font'] ?? 'Helvetica';
+                $fontPt   = (float)($hri['fontPt'] ?? 10.0);
+                $text .= $this->pdfHriCommands(
+                    $hri['type'], $hri['digits'],
+                    $quietMods, $modulePt, $mods,
+                    $fontPt, (float)($hri['gapPt'] ?? 2.0)
+                );
+            }
         }
 
         $stream = $bars.$text;
 
         // Minimal PDF wrapper with core font
+        $fontName = $matchJpg ? 'Helvetica' : ($hri['font'] ?? 'Helvetica');
         $objs = [];
         $objs[] = "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
         $objs[] = "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n";
@@ -193,9 +327,31 @@ class VectorBarcodeRenderer
         @mkdir(dirname($epsAbs), 0775, true);
 
         $mods = strlen($pattern);
-        $textBlock = (!empty($hri['enabled'])) ? ($hri['fontPt'] + $hri['gapPt']) : 0.0;
-        $W = (int)ceil(($mods + 2*$quietMods) * $modulePt);
-        $H = (int)ceil($barHpt + $textBlock);
+        $matchJpg = !empty($hri['match_jpg']);
+        
+        if ($matchJpg) {
+            // Match JPG format exactly
+            $W = (int)ceil(self::WIDTH_PT);
+            $H = (int)ceil(self::HEIGHT_PT);
+            $quietX = self::QUIET_X_PT;
+            $padTop = self::PAD_TOP_PT;
+            $textH = self::TEXT_H_PT;
+            $barsW = self::WIDTH_PT - 2 * $quietX;
+            $barsH = self::HEIGHT_PT - $padTop - $textH;
+            $module = $barsW / 95.0;
+            $barStartY = $padTop;
+            $guardExtra = self::GUARD_EXTRA_PT;
+        } else {
+            // Original logic
+            $textBlock = (!empty($hri['enabled'])) ? ($hri['fontPt'] + $hri['gapPt']) : 0.0;
+            $W = (int)ceil(($mods + 2*$quietMods) * $modulePt);
+            $H = (int)ceil($barHpt + $textBlock);
+            $quietX = $quietMods * $modulePt;
+            $module = $modulePt;
+            $barStartY = $textBlock;
+            $barsH = $barHpt;
+            $guardExtra = 0;
+        }
 
         $ps  = "%!PS-Adobe-3.0 EPSF-3.0\n";
         $ps .= "%%BoundingBox: 0 0 {$W} {$H}\n";
@@ -204,27 +360,47 @@ class VectorBarcodeRenderer
         $ps .= "  newpath moveto 0 exch rlineto exch 0 rlineto 0 exch neg rlineto closepath fill\n";
         $ps .= "} bind def\n";
 
+        // Get guard bar indices
+        $guardIdx = $this->guardModuleIndices();
+
         // Bars
-        $x = $quietMods * $modulePt;
+        $x = $matchJpg ? $quietX : ($quietMods * $modulePt);
         for ($i=0; $i<$mods; ) {
             if ($pattern[$i] === '1') {
                 $run=0; while ($i+$run<$mods && $pattern[$i+$run]==='1'){ $run++; }
-                $w = $run * $modulePt;
-                $ps .= sprintf("%.3f %.3f %.3f %.3f b\n", $x, $textBlock, $w, $barHpt);
+                $w = $run * $module;
+                $barH = $barsH;
+                
+                // Extend guard bars if match_jpg is enabled
+                if ($matchJpg && isset($guardIdx[$i])) {
+                    $barH += $guardExtra;
+                }
+                
+                $ps .= sprintf("%.3f %.3f %.3f %.3f b\n", $x, $barStartY, $w, $barH);
                 $x += $w; $i += $run;
-            } else { $x += $modulePt; $i++; }
+            } else { $x += $module; $i++; }
         }
 
         // HRI
         if (!empty($hri['enabled'])) {
-            $font = $hri['font'] ?? 'Helvetica';
-            $sz   = (float)($hri['fontPt'] ?? 10.0);
-            $ps .= "/{$font} findfont {$sz} scalefont setfont\n";
-            $ps .= $this->epsHriCommands(
-                $hri['type'], $hri['digits'],
-                $quietMods, $modulePt, $mods,
-                $sz, (float)($hri['gapPt'] ?? 2.0)
-            );
+            if ($matchJpg) {
+                // Use JPG-matching text layout
+                $ps .= "/Helvetica findfont " . self::FONT_SIZE_PT . " scalefont setfont\n";
+                $ps .= $this->epsHriCommandsJpg(
+                    $hri['type'], $hri['digits'],
+                    $quietX, $barsW, $padTop, $barsH
+                );
+            } else {
+                // Original layout
+                $font = $hri['font'] ?? 'Helvetica';
+                $sz   = (float)($hri['fontPt'] ?? 10.0);
+                $ps .= "/{$font} findfont {$sz} scalefont setfont\n";
+                $ps .= $this->epsHriCommands(
+                    $hri['type'], $hri['digits'],
+                    $quietMods, $modulePt, $mods,
+                    $sz, (float)($hri['gapPt'] ?? 2.0)
+                );
+            }
         }
 
         $ps .= "%%EOF\n";
@@ -303,6 +479,63 @@ class VectorBarcodeRenderer
     private function pdfTm(float $x, float $y): string
     {
         return sprintf("1 0 0 1 %.3f %.3f Tm ", $x, $y);
+    }
+
+    /**
+     * Generate EPS HRI commands matching JPG format layout.
+     */
+    private function epsHriCommandsJpg(string $type, string $digits, float $quietX, float $barsW, float $padTop, float $barsH): string
+    {
+        $baselineY = $padTop + $barsH + self::GAP_BARS_TX_PT;
+        $halfW = $barsW / 2.0;
+        $fontSize = self::FONT_SIZE_PT;
+        $cw = 0.60 * $fontSize;
+        
+        $s = "";
+        
+        if ($type === 'upca' && strlen($digits) === 12) {
+            $d = str_split($digits);
+            $lead = $d[0];
+            $left = implode('', array_slice($d, 1, 5));
+            $right = implode('', array_slice($d, 6, 5));
+            $chk = $d[11];
+            
+            // Left single digit
+            $xLead = $quietX / 2 - $cw / 2;
+            $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xLead, $baselineY, $lead);
+            
+            // Left group
+            $xLeft = $quietX + ($halfW / 2) - (strlen($left) * $cw / 2);
+            $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xLeft, $baselineY, $left);
+            
+            // Right group
+            $xRight = $quietX + $halfW + ($halfW / 2) - (strlen($right) * $cw / 2);
+            $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xRight, $baselineY, $right);
+            
+            // Right single digit
+            $xChk = self::WIDTH_PT - $quietX / 2 - $cw / 2;
+            $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xChk, $baselineY, $chk);
+            
+        } elseif ($type === 'ean13' && strlen($digits) === 13) {
+            $d = str_split($digits);
+            $lead = $d[0];
+            $left6 = implode('', array_slice($d, 1, 6));
+            $right6 = implode('', array_slice($d, 7, 6));
+            
+            // Left single digit
+            $xLead = $quietX / 2 - $cw / 2;
+            $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xLead, $baselineY, $lead);
+            
+            // Left 6 digits
+            $xLeft = $quietX + ($halfW / 2) - (strlen($left6) * $cw / 2);
+            $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xLeft, $baselineY, $left6);
+            
+            // Right 6 digits
+            $xRight = $quietX + $halfW + ($halfW / 2) - (strlen($right6) * $cw / 2);
+            $s .= sprintf("%.3f %.3f moveto (%s) show\n", $xRight, $baselineY, $right6);
+        }
+        
+        return $s;
     }
 
     // EPS HRI commands

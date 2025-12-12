@@ -2,10 +2,27 @@
 
 namespace App\Services;
 
-use Illuminate\Support\Facades\Storage;
-
+/**
+ * Raster EAN-13 renderer (matches UPC-12 design).
+ * - Output: 460 x 300 px JPEG, JFIF tagged 300 DPI
+ * - Digits: OCR-B (recommended) or any TTF you pass in
+ * - Layout: single outer digit inside left quiet zone; 6+6 groups centered
+ */
 class Ean13RasterRenderer
 {
+    // Canvas / resolution
+    private const WIDTH   = 460;
+    private const HEIGHT  = 300;
+    private const DPI     = 72;      // will be embedded in the JPEG's JFIF header
+
+    // Layout (px) — tweak if you want tiny visual adjustments
+    private const QUIET_X       = 42; // left/right quiet zone width (also the single-digit box)
+    private const PAD_TOP       = 12; // top padding before bars
+    private const GAP_BARS_TX   = -10;  // gap between bars and digits baseline
+    private const TEXT_H        = 72; // block height reserved for digits (visual cap)
+    private const FONT_SIZE     = 34; // OCR-B point size for 300px height; adjust 32–36 if needed
+    private const JPEG_QUALITY  = 70;
+
     /**
      * Build a full 13-digit EAN by appending the check digit.
      * @param string $base12 exactly 12 numeric chars
@@ -20,12 +37,12 @@ class Ean13RasterRenderer
     }
 
     /**
-     * Render an EAN-13 barcode JPG at 300dpi-ish sizing.
+     * Render an EAN-13 barcode JPG at 460x300 px @ 300 DPI (matches UPC-12 design).
      *
      * @param string $ean13 13 digits (will not recompute)
      * @param string $destAbs absolute path for the .jpg
      * @param string $ttfAbs absolute path to OCRB.ttf
-     * @param array  $opts ['module'=>2,'bar_height'=>120,'font_size'=>18]
+     * @param array  $opts (ignored for consistency with UPC-12 fixed dimensions)
      */
     public function render(string $ean13, string $destAbs, string $ttfAbs, array $opts = []): void
     {
@@ -34,57 +51,97 @@ class Ean13RasterRenderer
             throw new \InvalidArgumentException('EAN-13 must be 13 digits.');
         }
         if (!is_readable($ttfAbs)) {
-            throw new \RuntimeException("OCRB.ttf not readable: {$ttfAbs}");
+            throw new \RuntimeException("TTF not readable: {$ttfAbs}");
         }
 
-        $module     = max(1, (int)($opts['module']     ?? 2));   // px per module
-        $barHeight  = max(50,(int)($opts['bar_height'] ?? 120)); // px
-        $fontSize   = max(8, (int)($opts['font_size']  ?? 18));  // pt
-        $quiet      = 11;  // modules on each side (spec minimum is 11)
+        // --- canvas ---------------------------------------------------------
+        $im = imagecreatetruecolor(self::WIDTH, self::HEIGHT);
+        imagealphablending($im, true);
+        imagesavealpha($im, false);
+        $white = imagecolorallocate($im, 255, 255, 255);
+        $black = imagecolorallocate($im, 0, 0, 0);
+        imagefilledrectangle($im, 0, 0, self::WIDTH, self::HEIGHT, $white);
 
-        // EAN-13 = 95 modules (incl. guards). Total with quiet zones:
-        $totalModules = $quiet + 95 + $quiet;
-        $width  = $totalModules * $module;
-        $topPad = 10;
-        $textPad = 38;
-        $height = $topPad + $barHeight + $textPad;
+        // --- bars geometry --------------------------------------------------
+        $barsW  = self::WIDTH - 2 * self::QUIET_X;
+        $barsH  = self::HEIGHT - self::PAD_TOP - self::TEXT_H;
+        $module = $barsW / 95.0; // EAN-13 is always 95 modules wide (same as UPC-A)
 
-        $img = imagecreatetruecolor($width, $height);
-        imagealphablending($img, true);
-        $white = imagecolorallocate($img, 255, 255, 255);
-        $black = imagecolorallocate($img,   0,   0,   0);
-        imagefilledrectangle($img, 0, 0, $width, $height, $white);
+        $pattern = $this->encodeModules($ean13);
 
-        // Build module bit string
-        $bits = $this->encodeModules($ean13);
-        // Prepend/append quiet zones (zeros)
-        $bits = str_repeat('0', $quiet) . $bits . str_repeat('0', $quiet);
+        $x = (float) self::QUIET_X;    // start bars after left quiet zone
+        $y = (int)   self::PAD_TOP;
+        $h = (int)   $barsH;
 
-        // Draw bars (only '1' modules)
-        $x = 0;
-        for ($i = 0, $n = strlen($bits); $i < $n; $i++, $x += $module) {
-            if ($bits[$i] === '1') {
-                imagefilledrectangle($img, $x, $topPad, $x + $module - 1, $topPad + $barHeight, $black);
+        // Optional: make guard bars a touch taller (visual authenticity)
+        $guardExtra = 6; // px
+        $guardIdx = $this->guardModuleIndices(); // which module indices are guard bars
+
+        // draw bars
+        $cursor = 0.0;
+        $modules = strlen($pattern);
+        for ($i = 0; $i < $modules; $i++) {
+            $isBar = ($pattern[$i] === '1');
+            $x1 = (int) round($x + $cursor);
+            $x2 = (int) round($x + $cursor + $module - 0.001);
+
+            if ($isBar) {
+                $y1 = $y;
+                $y2 = $y + $h;
+
+                if (isset($guardIdx[$i])) {
+                    // extend guard bars downwards slightly
+                    $y2 = min(self::HEIGHT - 1, $y2 + $guardExtra);
+                }
+                imagefilledrectangle($im, $x1, $y1, $x2, $y2, $black);
             }
+
+            $cursor += $module;
         }
 
-        // Text (center the full 13 digits)
-        $label = $ean13;
-        // Try to center text
-        $bbox = imagettfbbox($fontSize, 0, $ttfAbs, $label);
-        $textW = abs($bbox[2] - $bbox[0]);
-        $textX = max(0, (int)(($width - $textW) / 2));
-        $textY = $topPad + $barHeight + ($textPad * 0.75);
+        // --- human-readable digits -----------------------------------------
+        $baselineY = (int) round(self::PAD_TOP + $barsH + self::GAP_BARS_TX);
+        $halfW     = $barsW / 2.0;
 
-        imagettftext($img, $fontSize, 0, $textX, (int)$textY, $black, $ttfAbs, $label);
+        $lead   = substr($ean13, 0, 1);
+        $left6  = substr($ean13, 1, 6);
+        $right6 = substr($ean13, 7, 6);
 
-        // Ensure dir and write
+        // left single digit — centered inside left quiet zone
+        $this->ttfCenteredBox(
+            $im, $ttfAbs, self::FONT_SIZE, $black,
+            0, $baselineY,
+            self::QUIET_X, self::TEXT_H,
+            $lead, 'C'
+        );
+
+        // left group — centered under the left half of the bars
+        $this->ttfCenteredBox(
+            $im, $ttfAbs, self::FONT_SIZE, $black,
+            (int) round(self::QUIET_X), $baselineY,
+            (int) round($halfW), self::TEXT_H,
+            $left6, 'C'
+        );
+
+        // right group — centered under the right half of the bars
+        $this->ttfCenteredBox(
+            $im, $ttfAbs, self::FONT_SIZE, $black,
+            (int) round(self::QUIET_X + $halfW), $baselineY,
+            (int) round($halfW), self::TEXT_H,
+            $right6, 'C'
+        );
+
+        // --- save JPEG + tag 300 DPI ---------------------------------------
+        // Buffer the JPEG so we can patch JFIF density to 300dpi
+        ob_start();
+        imagejpeg($im, null, self::JPEG_QUALITY);
+        $jpeg = ob_get_clean();
+        imagedestroy($im);
+
+        $jpeg = $this->setJpegDpi($jpeg, self::DPI, self::DPI);
         @mkdir(dirname($destAbs), 0775, true);
-        imagejpeg($img, $destAbs, 95);
-        imagedestroy($img);
-
-        if (!file_exists($destAbs)) {
-            throw new \RuntimeException("Failed writing EAN-13 JPG: {$destAbs}");
+        if (file_put_contents($destAbs, $jpeg) === false) {
+            throw new \RuntimeException("Failed to write {$destAbs}");
         }
     }
 
@@ -143,5 +200,92 @@ class Ean13RasterRenderer
         }
 
         return $startGuard . $leftBits . $centerGuard . $rightBits . $endGuard;
+    }
+
+    /**
+     * Module indices that belong to guard bars (to extend them visually).
+     */
+    private function guardModuleIndices(): array
+    {
+        // start guard:   0..2
+        // center guard:  45..49
+        // end guard:     92..94
+        $idx = [];
+        for ($i = 0; $i <= 2; $i++)   $idx[$i] = true;
+        for ($i = 45; $i <= 49; $i++) $idx[$i] = true;
+        for ($i = 92; $i <= 94; $i++) $idx[$i] = true;
+        return $idx;
+    }
+
+    /**
+     * Draw text centered in a box (x,y is LEFT/TOP of the box).
+     * $align: 'L' | 'C' | 'R' (horizontal inside the given width)
+     */
+    private function ttfCenteredBox(
+        $im,
+        string $ttf,
+        int $sizePt,
+        int $color,
+        int $x,
+        int $yTop,
+        int $w,
+        int $h,
+        string $text,
+        string $align = 'C'
+    ): void {
+        $bbox = imagettfbbox($sizePt, 0, $ttf, $text);
+        // width/height from bbox
+        $textW = $bbox[2] - $bbox[0];
+        $textH = $bbox[1] - $bbox[7];
+        $baselineOffset = -$bbox[7]; // distance from baseline to top of glyphs
+
+        // horizontal
+        switch ($align) {
+            case 'L':
+                $tx = $x - $bbox[0];
+                break;
+            case 'R':
+                $tx = $x + $w - $textW - $bbox[0];
+                break;
+            default: // 'C'
+                $tx = $x + (int) round(($w - $textW) / 2) - $bbox[0];
+        }
+
+        // vertical: center within the box; imagettftext expects baseline Y
+        $ty = $yTop + (int) round(($h - $textH) / 2) + $baselineOffset;
+
+        imagettftext($im, $sizePt, 0, $tx, $ty, $color, $ttf, $text);
+    }
+
+    /**
+     * Patch a JPEG buffer so its JFIF density is set to the given DPI.
+     * Returns modified binary string.
+     */
+    private function setJpegDpi(string $jpeg, int $xdpi, int $ydpi): string
+    {
+        // Look for the JFIF APP0 segment
+        $pos = strpos($jpeg, "JFIF\0");
+        if ($pos === false) {
+            // No JFIF header? Just return as-is.
+            return $jpeg;
+        }
+        // Right after "JFIF\0" come: version(2), units(1), Xdensity(2), Ydensity(2)
+        $unitsOffset = $pos + 5 + 2; // skip "JFIF\0" + version
+        $xdensityOff = $unitsOffset + 1;
+        $ydensityOff = $unitsOffset + 3;
+
+        // Set units = 1 (dots per inch)
+        $jpeg[$unitsOffset] = chr(1);
+
+        // Big-endian 2-byte ints
+        $x = pack('n', max(1, min(65535, $xdpi)));
+        $y = pack('n', max(1, min(65535, $ydpi)));
+
+        $jpeg[$xdensityOff]     = $x[0];
+        $jpeg[$xdensityOff + 1] = $x[1];
+        $jpeg[$ydensityOff]     = $y[0];
+        $jpeg[$ydensityOff + 1] = $y[1];
+
+        return $jpeg;
     }
 }

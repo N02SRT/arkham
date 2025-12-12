@@ -113,6 +113,10 @@ class RenderBarcodeChunk implements ShouldQueue
         $fontPt = (float) config('barcodes.vector_font_pt', 10.0);
         $gapPt  = (float) config('barcodes.vector_text_gap_pt', 2.0);
 
+        // Cache duration: 7 days
+        $cacheDays = (int) config('barcodes.cache_days', 7);
+        $cacheExpiry = now()->subDays($cacheDays);
+
         for ($base = $this->startBase; strcmp($base, $this->endBase) <= 0; $base = $this->inc($base)) {
             try {
                 $upc12 = $upcRenderer->makeUpc12($base); // 12-digit with check
@@ -138,25 +142,37 @@ class RenderBarcodeChunk implements ShouldQueue
 
                 // --- render original JPGs ---
                 if ($makeJpg) {
-                    if (!$disk->exists($upcJpgRel)) {
+                    if (!$this->isFileCached($disk, $upcJpgRel, $cacheExpiry)) {
                         $upcRenderer->render($upc12, $upcJpgAbs, $ttf);
                         Log::info('RenderBarcodeChunk: wrote jpg', ['path' => $upcJpgAbs]);
+                    } else {
+                        Log::debug('RenderBarcodeChunk: skipped jpg (cached)', ['path' => $upcJpgRel]);
                     }
-                    if (!$disk->exists($eanJpgRel)) {
+                    if (!$this->isFileCached($disk, $eanJpgRel, $cacheExpiry)) {
                         $eanRenderer->render($ean13, $eanJpgAbs, $ttf);
                         Log::info('RenderBarcodeChunk: wrote jpg', ['path' => $eanJpgAbs]);
+                    } else {
+                        Log::debug('RenderBarcodeChunk: skipped jpg (cached)', ['path' => $eanJpgRel]);
                     }
                 }
 
                 // --- PDFs ---
                 if ($makePdf) {
-                    if (!$disk->exists($upcPdfRel)) { $vec->renderPdfUpc12($upc12, $upcPdfAbs, $modPt, $barHp, $quiet, true, $font, $fontPt, $gapPt); }
-                    if (!$disk->exists($eanPdfRel)) { $vec->renderPdfEan13($ean13, $eanPdfAbs, $modPt, $barHp, $quiet, true, $font, $fontPt, $gapPt); }
+                    if (!$this->isFileCached($disk, $upcPdfRel, $cacheExpiry)) {
+                        $vec->renderPdfUpc12($upc12, $upcPdfAbs, $modPt, $barHp, $quiet, true, $font, $fontPt, $gapPt);
+                    }
+                    if (!$this->isFileCached($disk, $eanPdfRel, $cacheExpiry)) {
+                        $vec->renderPdfEan13($ean13, $eanPdfAbs, $modPt, $barHp, $quiet, true, $font, $fontPt, $gapPt);
+                    }
                 }
                 // --- EPS ---
                 if ($makeEps) {
-                    if (!$disk->exists($upcEpsRel)) { $vec->renderEpsUpc12($upc12, $upcEpsAbs, $modPt, $barHp, $quiet, true, $font, $fontPt, $gapPt); }
-                    if (!$disk->exists($eanEpsRel)) { $vec->renderEpsEan13($ean13, $eanEpsAbs, $modPt, $barHp, $quiet, true, $font, $fontPt, $gapPt); }
+                    if (!$this->isFileCached($disk, $upcEpsRel, $cacheExpiry)) {
+                        $vec->renderEpsUpc12($upc12, $upcEpsAbs, $modPt, $barHp, $quiet, true, $font, $fontPt, $gapPt);
+                    }
+                    if (!$this->isFileCached($disk, $eanEpsRel, $cacheExpiry)) {
+                        $vec->renderEpsEan13($ean13, $eanEpsAbs, $modPt, $barHp, $quiet, true, $font, $fontPt, $gapPt);
+                    }
                 }
 
             } catch (\Throwable $e) {
@@ -199,6 +215,36 @@ class RenderBarcodeChunk implements ShouldQueue
     private function inc(string $s): string
     {
         return str_pad((string)((int)$s + 1), 11, '0', STR_PAD_LEFT);
+    }
+
+    /**
+     * Check if a file exists and is within the cache period.
+     * Returns true if file exists and was modified after the cache expiry date.
+     * Returns false if file doesn't exist or is older than cache expiry.
+     *
+     * @param \Illuminate\Contracts\Filesystem\Filesystem $disk
+     * @param string $fileRel Relative file path
+     * @param \Illuminate\Support\Carbon $cacheExpiry Cache expiry date
+     * @return bool
+     */
+    private function isFileCached($disk, string $fileRel, $cacheExpiry): bool
+    {
+        if (!$disk->exists($fileRel)) {
+            return false;
+        }
+
+        try {
+            $lastModified = $disk->lastModified($fileRel);
+            $fileDate = \Carbon\Carbon::createFromTimestamp($lastModified);
+            return $fileDate->isAfter($cacheExpiry);
+        } catch (\Throwable $e) {
+            // If we can't read the modification time, assume file is not cached
+            Log::warning('RenderBarcodeChunk: failed to read file modification time', [
+                'file' => $fileRel,
+                'error' => $e->getMessage(),
+            ]);
+            return false;
+        }
     }
 
     // --- Converters ---

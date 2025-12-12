@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Http;
+use TCPDF;
 
 class FinalizeBarcodePackage implements ShouldQueue
 {
@@ -58,14 +59,64 @@ class FinalizeBarcodePackage implements ShouldQueue
             // 2) Copy top-level extras (rename invoice/certificate to include order #)
             $this->copyTopLevelExtras($disk, $rootRel, $this->orderNo);
 
-            // 3) Create UPC number list CSV (saved with .xls extension like the sample)
-            $this->writeUpcNumberListXls($disk, $rootRel, $this->orderNo);
+            // 3) Create number lists (PDF and Excel) for both UPC-12 and EAN-13
+            $this->writeNumberLists($disk, $rootRel, $this->orderNo);
 
-            // 4) Build ZIP
+            // 4) Build ZIP (check cache first)
             $zipRel = dirname($rootRel) . '/' . basename($rootRel) . '.zip';
+            $cacheDays = (int) config('barcodes.cache_days', 7);
+            $cacheExpiry = now()->subDays($cacheDays);
+            
+            $zipIsCached = false;
             if ($disk->exists($zipRel)) {
-                $disk->delete($zipRel);
+                try {
+                    $lastModified = $disk->lastModified($zipRel);
+                    $zipDate = \Carbon\Carbon::createFromTimestamp($lastModified);
+                    if ($zipDate->isAfter($cacheExpiry)) {
+                        $zipIsCached = true;
+                        Log::info('FinalizeBarcodePackage: ZIP is cached, skipping regeneration', [
+                            'zip' => $zipRel,
+                            'last_modified' => $zipDate->toDateTimeString(),
+                        ]);
+                    } else {
+                        Log::info('FinalizeBarcodePackage: ZIP cache expired, regenerating', [
+                            'zip' => $zipRel,
+                            'last_modified' => $zipDate->toDateTimeString(),
+                            'cache_expiry' => $cacheExpiry->toDateTimeString(),
+                        ]);
+                        $disk->delete($zipRel);
+                    }
+                } catch (\Throwable $e) {
+                    Log::warning('FinalizeBarcodePackage: failed to check ZIP cache, regenerating', [
+                        'zip' => $zipRel,
+                        'error' => $e->getMessage(),
+                    ]);
+                    $disk->delete($zipRel);
+                }
             }
+            
+            if ($zipIsCached) {
+                // ZIP is cached, skip generation but still update DB and Redis
+                $bj = BarcodeJob::find($this->barcodeJobId);
+                $bj?->update([
+                    'zip_rel_path' => $zipRel,
+                    'finished_at'  => now(),
+                ]);
+
+                // Mark counters complete in Redis
+                $k = "barcodes:progress:job:{$this->barcodeJobId}";
+                if ($bj && $bj->total_jobs) {
+                    Redis::hset($k, 'done', $bj->total_jobs);
+                    Redis::expire($k, 86400);
+                }
+
+                Log::info('FinalizeBarcodePackage: using cached ZIP', [
+                    'zip'   => $zipRel,
+                    'jobRowId' => $this->barcodeJobId,
+                ]);
+                return;
+            }
+            
             $zipAbs = $disk->path($zipRel);
 
             // Pre-count for logging (also useful when 7z path is used)
@@ -172,7 +223,6 @@ class FinalizeBarcodePackage implements ShouldQueue
         $dirs = [
             'UPC-12/JPG', 'UPC-12/PDF', 'UPC-12/EPS',
             'EAN-13/JPG', 'EAN-13/PDF', 'EAN-13/EPS',
-            'Speedy Extras',
         ];
         foreach ($dirs as $d) {
             $disk->makeDirectory(trim($rootRel . '/' . $d, '/'));
@@ -206,14 +256,15 @@ class FinalizeBarcodePackage implements ShouldQueue
     }
 
     /**
-     * Produce a simple CSV (saved with .xls extension like the sample) for the UPCs we generated.
+     * Generate number lists (PDF and Excel) for both UPC-12 and EAN-13.
      * Can generate from numeric range (preferred) or by scanning JPG files (fallback).
      */
-    private function writeUpcNumberListXls($disk, string $rootRel, string $orderNo): void
+    private function writeNumberLists($disk, string $rootRel, string $orderNo): void
     {
         // Check per-job options to see if XLS is desired
         $optKey = "barcodes:options:job:{$this->barcodeJobId}";
-        $codes = [];
+        $upcCodes = [];
+        $eanCodes = [];
         
         try {
             $xlsOpt = Redis::hget($optKey, 'xls');
@@ -232,29 +283,34 @@ class FinalizeBarcodePackage implements ShouldQueue
             if ($start && $end && preg_match('/^\d{11}$/', $start) && preg_match('/^\d{11}$/', $end)) {
                 // Generate codes directly from the numeric range
                 for ($base = $start; strcmp($base, $end) <= 0; $base = $this->incBase($base)) {
-                    $codes[] = $this->makeUpc12($base);
+                    $upc12 = $this->makeUpc12($base);
+                    $upcCodes[] = $upc12;
+                    $eanCodes[] = '0' . $upc12; // EAN-13 is UPC-12 with leading 0
                 }
-                Log::info('FinalizeBarcodePackage: generated XLS from numeric range', [
+                Log::info('FinalizeBarcodePackage: generated number lists from numeric range', [
                     'jobRowId' => $this->barcodeJobId,
                     'start'    => $start,
                     'end'      => $end,
-                    'count'    => count($codes),
+                    'count'    => count($upcCodes),
                 ]);
             } else {
                 // Fallback: scan JPG files if range not available
-                $jpgDirRel = $rootRel . '/UPC-12/JPG';
-                if ($disk->exists($jpgDirRel)) {
-                    $files = $disk->files($jpgDirRel);
+                $upcJpgDirRel = $rootRel . '/UPC-12/JPG';
+                if ($disk->exists($upcJpgDirRel)) {
+                    $files = $disk->files($upcJpgDirRel);
                     foreach ($files as $rel) {
                         $bn = basename($rel);
                         if (preg_match('/^UPC-12-(\d{12})\.jpg$/', $bn, $m)) {
-                            $codes[] = $m[1];
+                            $upc12 = $m[1];
+                            $upcCodes[] = $upc12;
+                            $eanCodes[] = '0' . $upc12;
                         }
                     }
-                    sort($codes, SORT_STRING);
-                    Log::info('FinalizeBarcodePackage: generated XLS from JPG filenames (fallback)', [
+                    sort($upcCodes, SORT_STRING);
+                    sort($eanCodes, SORT_STRING);
+                    Log::info('FinalizeBarcodePackage: generated number lists from JPG filenames (fallback)', [
                         'jobRowId' => $this->barcodeJobId,
-                        'count'    => count($codes),
+                        'count'    => count($upcCodes),
                     ]);
                 }
             }
@@ -265,35 +321,133 @@ class FinalizeBarcodePackage implements ShouldQueue
                 'error'    => $e->getMessage(),
             ]);
             
-            $jpgDirRel = $rootRel . '/UPC-12/JPG';
-            if ($disk->exists($jpgDirRel)) {
-                $files = $disk->files($jpgDirRel);
+            $upcJpgDirRel = $rootRel . '/UPC-12/JPG';
+            if ($disk->exists($upcJpgDirRel)) {
+                $files = $disk->files($upcJpgDirRel);
                 foreach ($files as $rel) {
                     $bn = basename($rel);
                     if (preg_match('/^UPC-12-(\d{12})\.jpg$/', $bn, $m)) {
-                        $codes[] = $m[1];
+                        $upc12 = $m[1];
+                        $upcCodes[] = $upc12;
+                        $eanCodes[] = '0' . $upc12;
                     }
                 }
-                sort($codes, SORT_STRING);
+                sort($upcCodes, SORT_STRING);
+                sort($eanCodes, SORT_STRING);
             }
         }
 
-        if (empty($codes)) {
-            Log::warning('FinalizeBarcodePackage: no UPC codes found for XLS generation', [
+        if (empty($upcCodes)) {
+            Log::warning('FinalizeBarcodePackage: no UPC codes found for number list generation', [
                 'jobRowId' => $this->barcodeJobId,
                 'root'     => $rootRel,
             ]);
             return;
         }
 
-        // CSV content with header
+        // Generate UPC-12 number lists
+        $this->writeUpcNumberListXls($disk, $rootRel, $orderNo, $upcCodes);
+        $this->writeUpcNumberListPdf($disk, $rootRel, $orderNo, $upcCodes);
+
+        // Generate EAN-13 number lists
+        $this->writeEanNumberListXls($disk, $rootRel, $orderNo, $eanCodes);
+        $this->writeEanNumberListPdf($disk, $rootRel, $orderNo, $eanCodes);
+    }
+
+    /**
+     * Write UPC-12 number list as Excel (CSV with .xls extension).
+     */
+    private function writeUpcNumberListXls($disk, string $rootRel, string $orderNo, array $codes): void
+    {
         $csv = "UPC-12\n" . implode("\n", $codes) . "\n";
         $xlsRel = $rootRel . '/UPC-12/UPC-12 XLS Number List - Order # ' . $orderNo . '.xls';
         $disk->put($xlsRel, $csv);
-        Log::info('FinalizeBarcodePackage: wrote UPC number list (xls-as-csv)', [
+        Log::info('FinalizeBarcodePackage: wrote UPC-12 XLS number list', [
             'file'  => $xlsRel,
             'count' => count($codes),
         ]);
+    }
+
+    /**
+     * Write UPC-12 number list as PDF.
+     */
+    private function writeUpcNumberListPdf($disk, string $rootRel, string $orderNo, array $codes): void
+    {
+        $pdfAbs = $disk->path($rootRel . '/UPC-12/UPC-12 PDF Number List - Order # ' . $orderNo . '.pdf');
+        $this->writeNumberListPdf($pdfAbs, 'UPC-12', $codes, $orderNo);
+        Log::info('FinalizeBarcodePackage: wrote UPC-12 PDF number list', [
+            'file'  => $pdfAbs,
+            'count' => count($codes),
+        ]);
+    }
+
+    /**
+     * Write EAN-13 number list as Excel (CSV with .xls extension).
+     */
+    private function writeEanNumberListXls($disk, string $rootRel, string $orderNo, array $codes): void
+    {
+        $csv = "EAN-13\n" . implode("\n", $codes) . "\n";
+        $xlsRel = $rootRel . '/EAN-13/EAN-13 XLS Number List - Order # ' . $orderNo . '.xls';
+        $disk->put($xlsRel, $csv);
+        Log::info('FinalizeBarcodePackage: wrote EAN-13 XLS number list', [
+            'file'  => $xlsRel,
+            'count' => count($codes),
+        ]);
+    }
+
+    /**
+     * Write EAN-13 number list as PDF.
+     */
+    private function writeEanNumberListPdf($disk, string $rootRel, string $orderNo, array $codes): void
+    {
+        $pdfAbs = $disk->path($rootRel . '/EAN-13/EAN-13 PDF Number List - Order # ' . $orderNo . '.pdf');
+        $this->writeNumberListPdf($pdfAbs, 'EAN-13', $codes, $orderNo);
+        Log::info('FinalizeBarcodePackage: wrote EAN-13 PDF number list', [
+            'file'  => $pdfAbs,
+            'count' => count($codes),
+        ]);
+    }
+
+    /**
+     * Generate a PDF number list using TCPDF.
+     */
+    private function writeNumberListPdf(string $pdfAbs, string $type, array $codes, string $orderNo): void
+    {
+        @mkdir(dirname($pdfAbs), 0775, true);
+
+        $pdf = new TCPDF('P', 'mm', 'A4', true, 'UTF-8', false);
+        $pdf->setPrintHeader(false);
+        $pdf->setPrintFooter(false);
+        $pdf->SetMargins(15, 15, 15);
+        $pdf->SetAutoPageBreak(true, 15);
+        $pdf->AddPage();
+
+        // Title
+        $pdf->SetFont('helvetica', 'B', 16);
+        $pdf->Cell(0, 10, "{$type} Number List - Order # {$orderNo}", 0, 1, 'C');
+        $pdf->Ln(5);
+
+        // Table header
+        $pdf->SetFont('helvetica', 'B', 12);
+        $pdf->Cell(0, 8, $type, 1, 1, 'C');
+
+        // Codes
+        $pdf->SetFont('helvetica', '', 10);
+        $lineHeight = 7;
+        $maxPerPage = floor((297 - 50) / $lineHeight); // A4 height minus margins, divided by line height
+        
+        foreach ($codes as $index => $code) {
+            if ($index > 0 && $index % $maxPerPage === 0) {
+                $pdf->AddPage();
+                // Repeat header on new page
+                $pdf->SetFont('helvetica', 'B', 12);
+                $pdf->Cell(0, 8, $type, 1, 1, 'C');
+                $pdf->SetFont('helvetica', '', 10);
+            }
+            $pdf->Cell(0, $lineHeight, $code, 1, 1, 'C');
+        }
+
+        $pdf->Output($pdfAbs, 'F');
     }
 
     /**
