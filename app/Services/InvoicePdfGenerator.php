@@ -24,14 +24,42 @@ class InvoicePdfGenerator
 
         // Ensure TCPDF constants and directories are set up
         Log::info('InvoicePdfGenerator: setting up TCPDF constants');
+        if (!defined('K_PATH_MAIN')) {
+            $tcpdfPath = base_path('vendor/tecnickcom/tcpdf/');
+            if (is_dir($tcpdfPath)) {
+                define('K_PATH_MAIN', $tcpdfPath);
+            }
+        }
         if (!defined('K_PATH_FONTS')) {
             define('K_PATH_FONTS', storage_path('tcpdf-fonts') . '/');
         }
         if (!defined('K_PATH_CACHE')) {
             define('K_PATH_CACHE', storage_path('framework/cache/tcpdf') . '/');
         }
-        File::ensureDirectoryExists(storage_path('tcpdf-fonts'));
-        File::ensureDirectoryExists(storage_path('framework/cache/tcpdf'));
+        if (!defined('K_PATH_URL')) {
+            define('K_PATH_URL', '');
+        }
+        $fontsDir = storage_path('tcpdf-fonts');
+        $cacheDir = storage_path('framework/cache/tcpdf');
+        File::ensureDirectoryExists($fontsDir);
+        File::ensureDirectoryExists($cacheDir);
+        
+        // Ensure directories are writable
+        if (!is_writable($fontsDir)) {
+            Log::error('InvoicePdfGenerator: fonts directory not writable', ['dir' => $fontsDir]);
+            throw new \RuntimeException("TCPDF fonts directory not writable: {$fontsDir}");
+        }
+        if (!is_writable($cacheDir)) {
+            Log::error('InvoicePdfGenerator: cache directory not writable', ['dir' => $cacheDir]);
+            throw new \RuntimeException("TCPDF cache directory not writable: {$cacheDir}");
+        }
+        
+        // Ensure system temp directory is writable (TCPDF uses it during construction)
+        $tempDir = sys_get_temp_dir();
+        if (!is_writable($tempDir)) {
+            Log::error('InvoicePdfGenerator: system temp directory not writable', ['temp_dir' => $tempDir]);
+            throw new \RuntimeException("System temp directory not writable: {$tempDir}");
+        }
 
         Log::info('InvoicePdfGenerator: creating TCPDF instance');
         try {
