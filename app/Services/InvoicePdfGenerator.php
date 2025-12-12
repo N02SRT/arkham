@@ -22,14 +22,46 @@ class InvoicePdfGenerator
         @mkdir(dirname($pdfAbs), 0775, true);
 
         Log::info('InvoicePdfGenerator: creating TCPDF instance');
-        $pdf = new TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
-        $pdf->setPrintHeader(false);
-        $pdf->setPrintFooter(false);
-        $pdf->SetMargins(15, 15, 15);
-        $pdf->SetAutoPageBreak(true, 15);
+        try {
+            $pdf = new TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
+            Log::info('InvoicePdfGenerator: TCPDF instance created');
+        } catch (\Throwable $e) {
+            Log::error('InvoicePdfGenerator: failed to create TCPDF instance', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            throw $e;
+        }
         
-        Log::info('InvoicePdfGenerator: adding page');
-        $pdf->AddPage();
+        try {
+            $pdf->setPrintHeader(false);
+            $pdf->setPrintFooter(false);
+            Log::info('InvoicePdfGenerator: header/footer set');
+        } catch (\Throwable $e) {
+            Log::error('InvoicePdfGenerator: failed to set header/footer', ['error' => $e->getMessage()]);
+            throw $e;
+        }
+        
+        try {
+            $pdf->SetMargins(15, 15, 15);
+            $pdf->SetAutoPageBreak(true, 15);
+            Log::info('InvoicePdfGenerator: margins and page break set');
+        } catch (\Throwable $e) {
+            Log::error('InvoicePdfGenerator: failed to set margins', ['error' => $e->getMessage()]);
+            throw $e;
+        }
+        
+        Log::info('InvoicePdfGenerator: about to call AddPage()');
+        try {
+            $pdf->AddPage();
+            Log::info('InvoicePdfGenerator: AddPage() completed');
+        } catch (\Throwable $e) {
+            Log::error('InvoicePdfGenerator: failed to add page', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            throw $e;
+        }
 
         // Company header
         $pdf->SetFont('helvetica', 'B', 20);
