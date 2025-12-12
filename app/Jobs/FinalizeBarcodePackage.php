@@ -3,6 +3,8 @@
 namespace App\Jobs;
 
 use App\Models\BarcodeJob;
+use App\Services\InvoicePdfGenerator;
+use App\Services\CertificatePdfGenerator;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -56,8 +58,8 @@ class FinalizeBarcodePackage implements ShouldQueue
             // 1) Ensure directory skeleton (matches the sample package layout)
             $this->ensureSkeleton($disk, $rootRel);
 
-            // 2) Copy top-level extras (rename invoice/certificate to include order #)
-            $this->copyTopLevelExtras($disk, $rootRel, $this->orderNo);
+            // 2) Generate invoice and certificate PDFs
+            $this->generateInvoiceAndCertificate($disk, $rootRel, $this->orderNo);
 
             // 3) Create number lists (PDF and Excel) for both UPC-12 and EAN-13
             $this->writeNumberLists($disk, $rootRel, $this->orderNo);
@@ -230,28 +232,87 @@ class FinalizeBarcodePackage implements ShouldQueue
     }
 
     /**
-     * Copy top-level PDFs if present in resources/barcodes.
-     * - !Read Me First.pdf
-     * - Speedy Invoice-Sample.pdf   -> Speedy Invoice-<ORDER>.pdf
-     * - Speedy Certificate-Sample.pdf -> Speedy Certificate-<ORDER>.pdf
+     * Generate invoice and certificate PDFs from customer/order data.
      */
-    private function copyTopLevelExtras($disk, string $rootRel, string $orderNo): void
+    private function generateInvoiceAndCertificate($disk, string $rootRel, string $orderNo): void
     {
+        // Copy "Read Me First" if it exists
         $srcBase = resource_path('barcodes');
+        $readMeSrc = $srcBase . DIRECTORY_SEPARATOR . '!Read Me First.pdf';
+        $readMeDest = $rootRel . '/!Read Me First.pdf';
+        if (is_readable($readMeSrc) && !$disk->exists($readMeDest)) {
+            $disk->put($readMeDest, file_get_contents($readMeSrc));
+            Log::info('FinalizeBarcodePackage: copied Read Me First', ['to' => $readMeDest]);
+        }
 
-        $map = [
-            '!Read Me First.pdf'            => '!Read Me First.pdf',
-            'Speedy Invoice-Sample.pdf'     => 'Speedy Invoice-' . $orderNo . '.pdf',
-            'Speedy Certificate-Sample.pdf' => 'Speedy Certificate-' . $orderNo . '.pdf',
-        ];
+        // Get customer and order data from Redis
+        $dataKey = "barcodes:data:job:{$this->barcodeJobId}";
+        $customer = null;
+        $order = null;
 
-        foreach ($map as $srcName => $destName) {
-            $src = $srcBase . DIRECTORY_SEPARATOR . $srcName;
-            $destRel = $rootRel . '/' . $destName;
-            if (is_readable($src) && !$disk->exists($destRel)) {
-                $disk->put($destRel, file_get_contents($src));
-                Log::info('FinalizeBarcodePackage: copied top-level extra', ['to' => $destRel]);
+        try {
+            $customerJson = Redis::hget($dataKey, 'customer');
+            $orderJson = Redis::hget($dataKey, 'order');
+            
+            if ($customerJson) {
+                $customer = json_decode($customerJson, true);
             }
+            if ($orderJson) {
+                $order = json_decode($orderJson, true);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('FinalizeBarcodePackage: failed to read customer/order data', [
+                'jobRowId' => $this->barcodeJobId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+
+        // Generate invoice if we have customer and order data
+        if ($customer && $order) {
+            try {
+                $invoiceGenerator = app(InvoicePdfGenerator::class);
+                $invoiceRel = $rootRel . '/Speedy Invoice-' . $orderNo . '.pdf';
+                $invoiceAbs = $disk->path($invoiceRel);
+                $invoiceGenerator->generate($invoiceAbs, $customer, $order, $orderNo);
+                Log::info('FinalizeBarcodePackage: generated invoice', ['file' => $invoiceRel]);
+            } catch (\Throwable $e) {
+                Log::error('FinalizeBarcodePackage: failed to generate invoice', [
+                    'jobRowId' => $this->barcodeJobId,
+                    'error'    => $e->getMessage(),
+                ]);
+            }
+
+            // Generate certificate(s) for each name
+            if (isset($order['certificate_names']) && is_array($order['certificate_names'])) {
+                $certificateGenerator = app(CertificatePdfGenerator::class);
+                $barcodes = $order['barcodes'] ?? [];
+                
+                foreach ($order['certificate_names'] as $name) {
+                    try {
+                        $certRel = $rootRel . '/Speedy Certificate-' . $orderNo . '.pdf';
+                        $certAbs = $disk->path($certRel);
+                        $certificateGenerator->generate($certAbs, $name, $orderNo, $barcodes);
+                        Log::info('FinalizeBarcodePackage: generated certificate', [
+                            'file' => $certRel,
+                            'name' => $name,
+                        ]);
+                        // Only generate one certificate file (use first name if multiple)
+                        break;
+                    } catch (\Throwable $e) {
+                        Log::error('FinalizeBarcodePackage: failed to generate certificate', [
+                            'jobRowId' => $this->barcodeJobId,
+                            'name'     => $name,
+                            'error'    => $e->getMessage(),
+                        ]);
+                    }
+                }
+            }
+        } else {
+            Log::warning('FinalizeBarcodePackage: skipping invoice/certificate generation - missing customer/order data', [
+                'jobRowId' => $this->barcodeJobId,
+                'has_customer' => !is_null($customer),
+                'has_order' => !is_null($order),
+            ]);
         }
     }
 

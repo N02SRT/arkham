@@ -286,6 +286,26 @@ class BarcodeController extends Controller
                 // e.g. ["jpg","pdf"], ["jpg","pdf","eps","xls"], etc.
                 'formats'   => ['nullable', 'array'],
                 'formats.*' => ['string', Rule::in(['jpg','pdf','eps','xls'])],
+                // Customer and order data for invoice/certificate generation
+                'customer' => ['nullable', 'array'],
+                'customer.name' => ['nullable', 'string', 'max:255'],
+                'customer.first_name' => ['nullable', 'string', 'max:255'],
+                'customer.last_name' => ['nullable', 'string', 'max:255'],
+                'customer.email' => ['nullable', 'email', 'max:255'],
+                'customer.company' => ['nullable', 'string', 'max:255'],
+                'customer.address' => ['nullable', 'array'],
+                'customer.phone' => ['nullable', 'array'],
+                'order' => ['nullable', 'array'],
+                'order.id' => ['nullable', 'integer'],
+                'order.order_no' => ['nullable', 'string', 'max:255'],
+                'order.date' => ['nullable', 'string'],
+                'order.date_formatted' => ['nullable', 'string'],
+                'order.total_usd' => ['nullable', 'string'],
+                'order.status' => ['nullable', 'string'],
+                'order.barcodes' => ['nullable', 'array'],
+                'order.certificate_names' => ['nullable', 'array'],
+                'order.products' => ['nullable', 'array'],
+                'order.country' => ['nullable', 'string', 'max:10'],
             ]);
         } catch (\Illuminate\Validation\ValidationException $e) {
             Log::warning('API: Barcode job creation validation failed', [
@@ -427,6 +447,26 @@ class BarcodeController extends Controller
                 'order_no' => $job->order_no,
                 'error'    => $e->getMessage(),
             ]);
+        }
+
+        // Store customer and order data for invoice/certificate generation
+        if (isset($data['customer']) || isset($data['order'])) {
+            $dataKey = "barcodes:data:job:{$job->id}";
+            try {
+                if (isset($data['customer'])) {
+                    Redis::hset($dataKey, 'customer', json_encode($data['customer']));
+                }
+                if (isset($data['order'])) {
+                    Redis::hset($dataKey, 'order', json_encode($data['order']));
+                }
+                Redis::expire($dataKey, 3 * 86400);
+            } catch (\Throwable $e) {
+                Log::warning('API: failed to store customer/order data', [
+                    'job_id'   => $job->id,
+                    'order_no' => $job->order_no,
+                    'error'    => $e->getMessage(),
+                ]);
+            }
         }
 
         // chunking
