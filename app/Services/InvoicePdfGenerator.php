@@ -17,13 +17,18 @@ class InvoicePdfGenerator
      */
     public function generate(string $pdfAbs, array $customer, array $order, string $orderNo): void
     {
+        Log::info('InvoicePdfGenerator: starting generation', ['path' => $pdfAbs]);
+        
         @mkdir(dirname($pdfAbs), 0775, true);
 
+        Log::info('InvoicePdfGenerator: creating TCPDF instance');
         $pdf = new TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
         $pdf->setPrintHeader(false);
         $pdf->setPrintFooter(false);
         $pdf->SetMargins(15, 15, 15);
         $pdf->SetAutoPageBreak(true, 15);
+        
+        Log::info('InvoicePdfGenerator: adding page');
         $pdf->AddPage();
 
         // Company header
@@ -178,12 +183,15 @@ class InvoicePdfGenerator
         }
 
         // Totals
+        Log::info('InvoicePdfGenerator: adding totals section');
         $pdf->SetFont('helvetica', 'B', 11);
         $pdf->Cell(155, 8, 'Order Total:', 0, 0, 'R');
         $total = isset($order['total_usd']) ? $order['total_usd'] : '0.00';
         $pdf->Cell(30, 8, '$' . number_format((float)$total, 2) . ' USD', 1, 1, 'R');
         $pdf->Cell(155, 8, 'Credit Card Payment:', 0, 0, 'R');
         $pdf->Cell(30, 8, '$' . number_format((float)$total, 2) . ' USD', 1, 1, 'R');
+        
+        Log::info('InvoicePdfGenerator: finished adding content, preparing to output');
 
         // Ensure directory exists and is writable
         $dir = dirname($pdfAbs);

@@ -332,11 +332,16 @@ class FinalizeBarcodePackage implements ShouldQueue
                     'jobRowId' => $this->barcodeJobId,
                     'invoice_rel' => $invoiceRel,
                     'invoice_abs' => $invoiceAbs,
+                    'customer_keys' => array_keys($customer),
+                    'order_keys' => array_keys($order),
                 ]);
                 
                 // Set a timeout to prevent hanging
                 set_time_limit(60); // 60 seconds max for invoice generation
+                
+                Log::info('FinalizeBarcodePackage: calling invoiceGenerator->generate()');
                 $invoiceGenerator->generate($invoiceAbs, $customer, $order, $orderNo);
+                Log::info('FinalizeBarcodePackage: invoiceGenerator->generate() returned');
                 
                 Log::info('FinalizeBarcodePackage: generated invoice', [
                     'file' => $invoiceRel,
@@ -347,6 +352,8 @@ class FinalizeBarcodePackage implements ShouldQueue
                     'jobRowId' => $this->barcodeJobId,
                     'error'    => $e->getMessage(),
                     'trace'    => $e->getTraceAsString(),
+                    'file'     => $e->getFile(),
+                    'line'     => $e->getLine(),
                 ]);
                 // Continue processing - invoice is optional
             }
