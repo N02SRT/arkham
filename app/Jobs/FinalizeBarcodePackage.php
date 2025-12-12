@@ -43,6 +43,14 @@ class FinalizeBarcodePackage implements ShouldQueue
         $disk     = Storage::disk($diskName);
 
         try {
+            // Ensure lock is released even if job fails
+            register_shutdown_function(function() use ($lockKey) {
+                try {
+                    Redis::del($lockKey);
+                } catch (\Throwable $e) {
+                    // Ignore errors during cleanup
+                }
+            });
             Log::info('FinalizeBarcodePackage: start', [
                 'root'    => $this->root,
                 'jobRowId'=> $this->barcodeJobId,
@@ -217,12 +225,22 @@ class FinalizeBarcodePackage implements ShouldQueue
         } catch (\Throwable $e) {
             Log::error('FinalizeBarcodePackage: failed', [
                 'root'   => $this->root,
+                'jobRowId' => $this->barcodeJobId,
                 'error'  => $e->getMessage(),
                 'trace'  => $e->getTraceAsString(),
             ]);
             throw $e;
         } finally {
-            Redis::del($lockKey);
+            // Always release the lock
+            try {
+                Redis::del($lockKey);
+                Log::info('FinalizeBarcodePackage: released lock', ['jobRowId' => $this->barcodeJobId]);
+            } catch (\Throwable $e) {
+                Log::warning('FinalizeBarcodePackage: failed to release lock', [
+                    'jobRowId' => $this->barcodeJobId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 
@@ -315,14 +333,22 @@ class FinalizeBarcodePackage implements ShouldQueue
                     'invoice_rel' => $invoiceRel,
                     'invoice_abs' => $invoiceAbs,
                 ]);
+                
+                // Set a timeout to prevent hanging
+                set_time_limit(60); // 60 seconds max for invoice generation
                 $invoiceGenerator->generate($invoiceAbs, $customer, $order, $orderNo);
-                Log::info('FinalizeBarcodePackage: generated invoice', ['file' => $invoiceRel]);
+                
+                Log::info('FinalizeBarcodePackage: generated invoice', [
+                    'file' => $invoiceRel,
+                    'size' => $disk->exists($invoiceRel) ? $disk->size($invoiceRel) : 0,
+                ]);
             } catch (\Throwable $e) {
                 Log::error('FinalizeBarcodePackage: failed to generate invoice', [
                     'jobRowId' => $this->barcodeJobId,
                     'error'    => $e->getMessage(),
                     'trace'    => $e->getTraceAsString(),
                 ]);
+                // Continue processing - invoice is optional
             }
 
             // Generate certificate(s) for each name

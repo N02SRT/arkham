@@ -184,7 +184,20 @@ class InvoicePdfGenerator
         $pdf->Cell(155, 8, 'Credit Card Payment:', 0, 0, 'R');
         $pdf->Cell(30, 8, '$' . number_format((float)$total, 2) . ' USD', 1, 1, 'R');
 
-        $pdf->Output($pdfAbs, 'F');
+        try {
+            $pdf->Output($pdfAbs, 'F');
+        } catch (\Throwable $e) {
+            // Clean up partial file if it exists
+            if (file_exists($pdfAbs)) {
+                @unlink($pdfAbs);
+            }
+            throw new \RuntimeException("Failed to write invoice PDF: " . $e->getMessage(), 0, $e);
+        }
+        
+        // Verify file was created
+        if (!file_exists($pdfAbs) || filesize($pdfAbs) === 0) {
+            throw new \RuntimeException("Invoice PDF was not created or is empty: {$pdfAbs}");
+        }
     }
 
     private function formatPhone(array $phone): string
