@@ -128,15 +128,15 @@ class VectorBarcodeRenderer
     private function pdfHriCommandsJpg(string $type, string $digits, float $quietX, float $barsW, float $padTop, float $barsH): string
     {
         // PDF coordinate system: (0,0) is bottom-left, so we need to flip Y coordinates
-        // Match JPG: baselineY = PAD_TOP + barsH + GAP_BARS_TX
-        // In JPG: baselineY is calculated from top, then used as yTop for ttfCenteredBox
-        // The ttfCenteredBox centers text vertically within TEXT_H, so actual text Y is baselineY + (TEXT_H - textH) / 2 + baselineOffset
-        // For simplicity, position text lower by reducing Y from bottom
+        // Match JPG exactly: baselineY = PAD_TOP + barsH + GAP_BARS_TX (from top)
+        // In JPG: baselineY is the top of the text box (yTop), ttfCenteredBox centers text within TEXT_H
+        // The actual text baseline in JPG is approximately at baselineY + (TEXT_H * 0.6) from top
+        // Convert to PDF: flip Y coordinate (from bottom)
         $baselineYFromTop = $padTop + $barsH + self::GAP_BARS_TX_PT;
-        // Lower text by positioning it further down (smaller Y from bottom in PDF)
-        // Account for text height - position at bottom of text area
-        $textAreaBottom = self::HEIGHT_PT - self::TEXT_H_PT;
-        $baselineYFromBottom = $textAreaBottom + (self::TEXT_H_PT * 0.3); // Position in lower portion of text area
+        // Text is centered in TEXT_H box, so actual baseline is lower in the box
+        // Position text baseline at about 65% down in the text area to match JPG visual
+        $textBaselineFromTop = $baselineYFromTop + (self::TEXT_H_PT * 0.65);
+        $baselineYFromBottom = self::HEIGHT_PT - $textBaselineFromTop;
         
         $halfW = $barsW / 2.0;
         $fontKey = '/F1';
@@ -504,9 +504,11 @@ class VectorBarcodeRenderer
     private function epsHriCommandsJpg(string $type, string $digits, float $quietX, float $barsW, float $padTop, float $barsH): string
     {
         // EPS coordinate system: (0,0) is bottom-left (same as PDF)
-        // Match JPG positioning - lower text in the text area
-        $textAreaBottom = self::HEIGHT_PT - self::TEXT_H_PT;
-        $baselineY = $textAreaBottom + (self::TEXT_H_PT * 0.3); // Position in lower portion of text area
+        // Match JPG exactly: baselineY = PAD_TOP + barsH + GAP_BARS_TX (from top)
+        // Text is centered in TEXT_H box, so actual baseline is lower in the box
+        $baselineYFromTop = $padTop + $barsH + self::GAP_BARS_TX_PT;
+        $textBaselineFromTop = $baselineYFromTop + (self::TEXT_H_PT * 0.65);
+        $baselineY = self::HEIGHT_PT - $textBaselineFromTop;
         $halfW = $barsW / 2.0;
         $fontSize = self::FONT_SIZE_PT;
         $cw = 0.60 * $fontSize;
