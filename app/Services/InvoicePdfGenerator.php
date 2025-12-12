@@ -24,10 +24,19 @@ class InvoicePdfGenerator
 
         // Create TCPDF instance directly (same approach as writeNumberListPdf which works)
         Log::info('InvoicePdfGenerator: creating TCPDF instance');
+        
+        // Use output buffering in case TCPDF tries to write to stdout during construction
+        ob_start();
         try {
-            $pdf = new TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
+            // Try using fully qualified class name in case there's a namespace issue
+            $pdf = new \TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
+            $output = ob_get_clean();
+            if (!empty($output)) {
+                Log::warning('InvoicePdfGenerator: TCPDF produced output during construction', ['output' => substr($output, 0, 200)]);
+            }
             Log::info('InvoicePdfGenerator: TCPDF instance created');
         } catch (\Throwable $e) {
+            ob_end_clean();
             Log::error('InvoicePdfGenerator: failed to create TCPDF instance', [
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
