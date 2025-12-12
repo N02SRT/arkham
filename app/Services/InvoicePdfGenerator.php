@@ -74,6 +74,39 @@ class InvoicePdfGenerator
             'main_class_exists' => file_exists($tcpdfVendorPath . '/tcpdf.php'),
         ]);
         
+        // Check what files TCPDF might try to access during construction
+        $potentialFiles = [
+            $fontsDir . '/helvetica.php',
+            $fontsDir . '/helveticab.php',
+            $fontsDir . '/helveticai.php',
+            $fontsDir . '/helveticabi.php',
+            $cacheDir . '/.htaccess',
+            $cacheDir . '/index.php',
+        ];
+        $fileChecks = [];
+        foreach ($potentialFiles as $file) {
+            $fileChecks[basename($file)] = [
+                'exists' => file_exists($file),
+                'readable' => file_exists($file) ? is_readable($file) : false,
+                'writable' => file_exists($file) ? is_writable($file) : false,
+            ];
+        }
+        Log::info('InvoicePdfGenerator: potential TCPDF file access checks', $fileChecks);
+        
+        // Check if cache directory has any existing files that might cause locks
+        if (is_dir($cacheDir)) {
+            $cacheFiles = @scandir($cacheDir);
+            if ($cacheFiles !== false) {
+                $cacheFileCount = count(array_filter($cacheFiles, function($f) {
+                    return $f !== '.' && $f !== '..';
+                }));
+                Log::info('InvoicePdfGenerator: cache directory contents', [
+                    'file_count' => $cacheFileCount,
+                    'files' => array_slice($cacheFiles, 0, 10), // First 10 files
+                ]);
+            }
+        }
+        
         // Check for any open file handles that might interfere
         if (function_exists('get_resources')) {
             $resources = get_resources();
@@ -93,6 +126,29 @@ class InvoicePdfGenerator
             'log_errors' => ini_get('log_errors'),
             'error_log' => ini_get('error_log'),
         ]);
+        
+        // Force-set TCPDF constants right before instantiation (override any defaults TCPDF may have set)
+        $correctCacheDir = storage_path('framework/cache/tcpdf') . '/';
+        if (defined('K_PATH_CACHE') && K_PATH_CACHE !== $correctCacheDir) {
+            Log::warning('InvoicePdfGenerator: K_PATH_CACHE was set incorrectly, forcing correct value', [
+                'old_value' => K_PATH_CACHE,
+                'new_value' => $correctCacheDir,
+            ]);
+            // Can't redefine constants, but we can ensure the directory exists
+            File::ensureDirectoryExists(rtrim($correctCacheDir, '/'));
+        } elseif (!defined('K_PATH_CACHE')) {
+            define('K_PATH_CACHE', $correctCacheDir);
+            File::ensureDirectoryExists(rtrim($correctCacheDir, '/'));
+        }
+        
+        if (defined('K_PATH_URL') && K_PATH_URL !== '') {
+            Log::warning('InvoicePdfGenerator: K_PATH_URL was set incorrectly', [
+                'old_value' => K_PATH_URL,
+            ]);
+            // Can't redefine, but log it
+        } elseif (!defined('K_PATH_URL')) {
+            define('K_PATH_URL', '');
+        }
         
         // Try to manually ensure TCPDF is loaded
         if (!class_exists('TCPDF', false)) {
@@ -118,12 +174,33 @@ class InvoicePdfGenerator
             throw new \RuntimeException('TCPDF class is not available');
         }
         
+        // Check font files that TCPDF might try to load during construction
+        $defaultFonts = ['helvetica', 'times', 'courier'];
+        $fontChecks = [];
+        foreach ($defaultFonts as $font) {
+            $fontFile = $fontsDir . '/' . $font . '.php';
+            $fontZFile = $fontsDir . '/' . $font . '.z';
+            $fontChecks[$font] = [
+                'php_exists' => file_exists($fontFile),
+                'php_readable' => file_exists($fontFile) ? is_readable($fontFile) : false,
+                'z_exists' => file_exists($fontZFile),
+                'z_readable' => file_exists($fontZFile) ? is_readable($fontZFile) : false,
+            ];
+        }
+        Log::info('InvoicePdfGenerator: default font file checks', $fontChecks);
+        
         // Create TCPDF instance directly (same approach as writeNumberListPdf which works)
         Log::info('InvoicePdfGenerator: about to instantiate TCPDF', [
             'timestamp' => microtime(true),
             'pid' => getmypid(),
             'class_loaded' => class_exists('TCPDF'),
             'autoloaders' => spl_autoload_functions() ? count(spl_autoload_functions()) : 0,
+            'constants_final' => [
+                'K_PATH_MAIN' => defined('K_PATH_MAIN') ? K_PATH_MAIN : 'NOT_DEFINED',
+                'K_PATH_FONTS' => defined('K_PATH_FONTS') ? K_PATH_FONTS : 'NOT_DEFINED',
+                'K_PATH_CACHE' => defined('K_PATH_CACHE') ? K_PATH_CACHE : 'NOT_DEFINED',
+                'K_PATH_URL' => defined('K_PATH_URL') ? K_PATH_URL : 'NOT_DEFINED',
+            ],
         ]);
         
         // Use output buffering in case TCPDF tries to write to stdout during construction
@@ -133,6 +210,12 @@ class InvoicePdfGenerator
             Log::info('InvoicePdfGenerator: calling new \\TCPDF()', [
                 'time' => microtime(true),
                 'memory_before_instantiation' => memory_get_usage(true),
+                'time_since_start' => round(microtime(true) - $startTime, 6),
+            ]);
+            
+            // Log right before the call that hangs
+            Log::info('InvoicePdfGenerator: EXECUTING new \\TCPDF() NOW', [
+                'exact_timestamp' => microtime(true),
             ]);
             
             // Try using fully qualified class name in case there's a namespace issue

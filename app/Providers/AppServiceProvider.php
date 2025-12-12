@@ -20,11 +20,29 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // Set TCPDF constants BEFORE any TCPDF class is loaded
+        if (!defined('K_PATH_MAIN')) {
+            define('K_PATH_MAIN', base_path('vendor/tecnickcom/tcpdf').'/');
+        }
+        
         // Tell TCPDF where to read/write font files
         if (!defined('K_PATH_FONTS')) {
             define('K_PATH_FONTS', storage_path('tcpdf-fonts').'/');
         }
+        
+        // Set cache directory (TCPDF uses this during construction)
+        if (!defined('K_PATH_CACHE')) {
+            define('K_PATH_CACHE', storage_path('framework/cache/tcpdf').'/');
+        }
+        
+        // Set URL (empty for file-based generation)
+        if (!defined('K_PATH_URL')) {
+            define('K_PATH_URL', '');
+        }
+        
+        // Ensure directories exist
         File::ensureDirectoryExists(storage_path('tcpdf-fonts'));
+        File::ensureDirectoryExists(storage_path('framework/cache/tcpdf'));
 
         // If OCRB isn't registered yet, add it from resources/fonts
         $fontPhp = storage_path('tcpdf-fonts/ocrb.php'); // what TCPDF will create
