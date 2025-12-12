@@ -22,23 +22,145 @@ class InvoicePdfGenerator
         
         @mkdir(dirname($pdfAbs), 0775, true);
 
+        // Comprehensive logging before TCPDF instantiation
+        Log::info('InvoicePdfGenerator: pre-instantiation checks', [
+            'class_exists' => class_exists('TCPDF'),
+            'class_exists_fully_qualified' => class_exists('\TCPDF'),
+            'memory_usage' => memory_get_usage(true),
+            'memory_peak' => memory_get_peak_usage(true),
+            'memory_limit' => ini_get('memory_limit'),
+            'max_execution_time' => ini_get('max_execution_time'),
+            'time_limit' => get_cfg_var('max_execution_time'),
+        ]);
+        
+        // Check TCPDF constants
+        $constants = [
+            'K_PATH_MAIN' => defined('K_PATH_MAIN') ? K_PATH_MAIN : 'NOT_DEFINED',
+            'K_PATH_FONTS' => defined('K_PATH_FONTS') ? K_PATH_FONTS : 'NOT_DEFINED',
+            'K_PATH_CACHE' => defined('K_PATH_CACHE') ? K_PATH_CACHE : 'NOT_DEFINED',
+            'K_PATH_URL' => defined('K_PATH_URL') ? K_PATH_URL : 'NOT_DEFINED',
+        ];
+        Log::info('InvoicePdfGenerator: TCPDF constants', $constants);
+        
+        // Check directories
+        $fontsDir = defined('K_PATH_FONTS') ? rtrim(K_PATH_FONTS, '/') : storage_path('tcpdf-fonts');
+        $cacheDir = defined('K_PATH_CACHE') ? rtrim(K_PATH_CACHE, '/') : storage_path('framework/cache/tcpdf');
+        Log::info('InvoicePdfGenerator: directory checks', [
+            'fonts_dir' => $fontsDir,
+            'fonts_exists' => is_dir($fontsDir),
+            'fonts_writable' => is_dir($fontsDir) ? is_writable($fontsDir) : false,
+            'cache_dir' => $cacheDir,
+            'cache_exists' => is_dir($cacheDir),
+            'cache_writable' => is_dir($cacheDir) ? is_writable($cacheDir) : false,
+            'temp_dir' => sys_get_temp_dir(),
+            'temp_writable' => is_writable(sys_get_temp_dir()),
+        ]);
+        
+        // Check for potential file locks
+        $fontLockFile = $fontsDir . '/.lock';
+        $cacheLockFile = $cacheDir . '/.lock';
+        Log::info('InvoicePdfGenerator: lock file checks', [
+            'font_lock_exists' => file_exists($fontLockFile),
+            'cache_lock_exists' => file_exists($cacheLockFile),
+        ]);
+        
+        // Check if TCPDF vendor directory exists and is readable
+        $tcpdfVendorPath = base_path('vendor/tecnickcom/tcpdf');
+        Log::info('InvoicePdfGenerator: TCPDF vendor directory check', [
+            'vendor_path' => $tcpdfVendorPath,
+            'exists' => is_dir($tcpdfVendorPath),
+            'readable' => is_dir($tcpdfVendorPath) ? is_readable($tcpdfVendorPath) : false,
+            'main_class_file' => $tcpdfVendorPath . '/tcpdf.php',
+            'main_class_exists' => file_exists($tcpdfVendorPath . '/tcpdf.php'),
+        ]);
+        
+        // Check for any open file handles that might interfere
+        if (function_exists('get_resources')) {
+            $resources = get_resources();
+            $fileResources = array_filter($resources, function($res) {
+                return get_resource_type($res) === 'stream';
+            });
+            Log::info('InvoicePdfGenerator: open file handles', [
+                'total_resources' => count($resources),
+                'file_handles' => count($fileResources),
+            ]);
+        }
+        
+        // Log PHP error reporting settings
+        Log::info('InvoicePdfGenerator: PHP error settings', [
+            'error_reporting' => error_reporting(),
+            'display_errors' => ini_get('display_errors'),
+            'log_errors' => ini_get('log_errors'),
+            'error_log' => ini_get('error_log'),
+        ]);
+        
+        // Try to manually ensure TCPDF is loaded
+        if (!class_exists('TCPDF', false)) {
+            Log::info('InvoicePdfGenerator: TCPDF not loaded, attempting manual load');
+            $tcpdfFile = base_path('vendor/tecnickcom/tcpdf/tcpdf.php');
+            if (file_exists($tcpdfFile)) {
+                try {
+                    require_once $tcpdfFile;
+                    Log::info('InvoicePdfGenerator: manually loaded TCPDF file');
+                } catch (\Throwable $e) {
+                    Log::warning('InvoicePdfGenerator: failed to manually load TCPDF', [
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            } else {
+                Log::warning('InvoicePdfGenerator: TCPDF file not found', ['path' => $tcpdfFile]);
+            }
+        }
+        
+        // Verify class exists after loading attempt
+        if (!class_exists('TCPDF')) {
+            Log::error('InvoicePdfGenerator: TCPDF class still not available after load attempt');
+            throw new \RuntimeException('TCPDF class is not available');
+        }
+        
         // Create TCPDF instance directly (same approach as writeNumberListPdf which works)
-        Log::info('InvoicePdfGenerator: creating TCPDF instance');
+        Log::info('InvoicePdfGenerator: about to instantiate TCPDF', [
+            'timestamp' => microtime(true),
+            'pid' => getmypid(),
+            'class_loaded' => class_exists('TCPDF'),
+            'autoloaders' => spl_autoload_functions() ? count(spl_autoload_functions()) : 0,
+        ]);
         
         // Use output buffering in case TCPDF tries to write to stdout during construction
         ob_start();
+        $startTime = microtime(true);
         try {
+            Log::info('InvoicePdfGenerator: calling new \\TCPDF()', [
+                'time' => microtime(true),
+                'memory_before_instantiation' => memory_get_usage(true),
+            ]);
+            
             // Try using fully qualified class name in case there's a namespace issue
             $pdf = new \TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
+            
+            $elapsed = microtime(true) - $startTime;
             $output = ob_get_clean();
+            
             if (!empty($output)) {
-                Log::warning('InvoicePdfGenerator: TCPDF produced output during construction', ['output' => substr($output, 0, 200)]);
+                Log::warning('InvoicePdfGenerator: TCPDF produced output during construction', [
+                    'output' => substr($output, 0, 200),
+                    'output_length' => strlen($output),
+                ]);
             }
-            Log::info('InvoicePdfGenerator: TCPDF instance created');
+            
+            Log::info('InvoicePdfGenerator: TCPDF instance created successfully', [
+                'elapsed_seconds' => round($elapsed, 3),
+                'memory_after' => memory_get_usage(true),
+                'pdf_class' => get_class($pdf),
+            ]);
         } catch (\Throwable $e) {
+            $elapsed = microtime(true) - $startTime;
             ob_end_clean();
             Log::error('InvoicePdfGenerator: failed to create TCPDF instance', [
                 'error' => $e->getMessage(),
+                'elapsed_seconds' => round($elapsed, 3),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
                 'trace' => $e->getTraceAsString(),
             ]);
             throw $e;

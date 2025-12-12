@@ -33,11 +33,21 @@ class FinalizeBarcodePackage implements ShouldQueue
     public function handle(): void
     {
         $lockKey = "barcodes:finalize:lock:{$this->barcodeJobId}";
-        if (!Redis::setnx($lockKey, (string) time())) {
-            Log::info('FinalizeBarcodePackage: another finalizer already running', ['jobRowId' => $this->barcodeJobId]);
+        $lockValue = (string) (time() . '-' . getmypid());
+        
+        // Try to acquire lock with atomic set-if-not-exists
+        if (!Redis::set($lockKey, $lockValue, 'EX', 600, 'NX')) {
+            Log::info('FinalizeBarcodePackage: another finalizer already running', [
+                'jobRowId' => $this->barcodeJobId,
+                'lock_key' => $lockKey,
+            ]);
             return;
         }
-        Redis::expire($lockKey, 600);
+        
+        Log::info('FinalizeBarcodePackage: acquired lock', [
+            'jobRowId' => $this->barcodeJobId,
+            'lock_value' => $lockValue,
+        ]);
 
         $diskName = config('barcodes.disk', config('filesystems.default'));
         $disk     = Storage::disk($diskName);
@@ -231,10 +241,19 @@ class FinalizeBarcodePackage implements ShouldQueue
             ]);
             throw $e;
         } finally {
-            // Always release the lock
+            // Always release the lock (only if we still own it)
             try {
-                Redis::del($lockKey);
-                Log::info('FinalizeBarcodePackage: released lock', ['jobRowId' => $this->barcodeJobId]);
+                $currentValue = Redis::get($lockKey);
+                if ($currentValue === $lockValue) {
+                    Redis::del($lockKey);
+                    Log::info('FinalizeBarcodePackage: released lock', ['jobRowId' => $this->barcodeJobId]);
+                } else {
+                    Log::warning('FinalizeBarcodePackage: lock value mismatch, not releasing', [
+                        'jobRowId' => $this->barcodeJobId,
+                        'expected' => $lockValue,
+                        'actual' => $currentValue,
+                    ]);
+                }
             } catch (\Throwable $e) {
                 Log::warning('FinalizeBarcodePackage: failed to release lock', [
                     'jobRowId' => $this->barcodeJobId,
@@ -325,7 +344,19 @@ class FinalizeBarcodePackage implements ShouldQueue
         // Generate invoice if we have customer and order data
         if ($customer && $order) {
             try {
-                $invoiceGenerator = app(InvoicePdfGenerator::class);
+                Log::info('FinalizeBarcodePackage: preparing to generate invoice', [
+                    'jobRowId' => $this->barcodeJobId,
+                    'memory_before' => memory_get_usage(true),
+                    'memory_peak_before' => memory_get_peak_usage(true),
+                    'pid' => getmypid(),
+                    'timestamp' => microtime(true),
+                ]);
+                
+                // Instantiate directly instead of using service container
+                Log::info('FinalizeBarcodePackage: instantiating InvoicePdfGenerator');
+                $invoiceGenerator = new InvoicePdfGenerator();
+                Log::info('FinalizeBarcodePackage: InvoicePdfGenerator instantiated');
+                
                 $invoiceRel = $rootRel . '/Speedy Invoice-' . $orderNo . '.pdf';
                 $invoiceAbs = $disk->path($invoiceRel);
                 Log::info('FinalizeBarcodePackage: generating invoice', [
@@ -334,14 +365,28 @@ class FinalizeBarcodePackage implements ShouldQueue
                     'invoice_abs' => $invoiceAbs,
                     'customer_keys' => array_keys($customer),
                     'order_keys' => array_keys($order),
+                    'directory_exists' => is_dir(dirname($invoiceAbs)),
+                    'directory_writable' => is_dir(dirname($invoiceAbs)) ? is_writable(dirname($invoiceAbs)) : false,
                 ]);
                 
                 // Set a timeout to prevent hanging
+                $oldTimeLimit = ini_get('max_execution_time');
                 set_time_limit(60); // 60 seconds max for invoice generation
+                Log::info('FinalizeBarcodePackage: set time limit', [
+                    'old_limit' => $oldTimeLimit,
+                    'new_limit' => ini_get('max_execution_time'),
+                ]);
                 
-                Log::info('FinalizeBarcodePackage: calling invoiceGenerator->generate()');
+                $callStartTime = microtime(true);
+                Log::info('FinalizeBarcodePackage: calling invoiceGenerator->generate()', [
+                    'timestamp' => $callStartTime,
+                ]);
                 $invoiceGenerator->generate($invoiceAbs, $customer, $order, $orderNo);
-                Log::info('FinalizeBarcodePackage: invoiceGenerator->generate() returned');
+                $callElapsed = microtime(true) - $callStartTime;
+                Log::info('FinalizeBarcodePackage: invoiceGenerator->generate() returned', [
+                    'elapsed_seconds' => round($callElapsed, 3),
+                    'memory_after' => memory_get_usage(true),
+                ]);
                 
                 Log::info('FinalizeBarcodePackage: generated invoice', [
                     'file' => $invoiceRel,
@@ -361,7 +406,8 @@ class FinalizeBarcodePackage implements ShouldQueue
             // Generate certificate(s) for each name
             if (isset($order['certificate_names']) && is_array($order['certificate_names']) && count($order['certificate_names']) > 0) {
                 try {
-                    $certificateGenerator = app(CertificatePdfGenerator::class);
+                    // Instantiate directly instead of using service container
+                    $certificateGenerator = new CertificatePdfGenerator();
                     $barcodes = $order['barcodes'] ?? [];
                     $name = $order['certificate_names'][0]; // Use first name
                     
