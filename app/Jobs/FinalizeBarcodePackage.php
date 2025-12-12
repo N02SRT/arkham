@@ -58,8 +58,17 @@ class FinalizeBarcodePackage implements ShouldQueue
             // 1) Ensure directory skeleton (matches the sample package layout)
             $this->ensureSkeleton($disk, $rootRel);
 
-            // 2) Generate invoice and certificate PDFs
-            $this->generateInvoiceAndCertificate($disk, $rootRel, $this->orderNo);
+            // 2) Generate invoice and certificate PDFs (non-blocking - continue even if it fails)
+            try {
+                $this->generateInvoiceAndCertificate($disk, $rootRel, $this->orderNo);
+            } catch (\Throwable $e) {
+                Log::error('FinalizeBarcodePackage: generateInvoiceAndCertificate threw exception', [
+                    'jobRowId' => $this->barcodeJobId,
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString(),
+                ]);
+                // Continue processing - invoice/certificate are optional
+            }
 
             // 3) Create number lists (PDF and Excel) for both UPC-12 and EAN-13
             $this->writeNumberLists($disk, $rootRel, $this->orderNo);
@@ -236,13 +245,20 @@ class FinalizeBarcodePackage implements ShouldQueue
      */
     private function generateInvoiceAndCertificate($disk, string $rootRel, string $orderNo): void
     {
-        // Copy "Read Me First" if it exists
-        $srcBase = resource_path('barcodes');
-        $readMeSrc = $srcBase . DIRECTORY_SEPARATOR . '!Read Me First.pdf';
-        $readMeDest = $rootRel . '/!Read Me First.pdf';
-        if (is_readable($readMeSrc) && !$disk->exists($readMeDest)) {
-            $disk->put($readMeDest, file_get_contents($readMeSrc));
-            Log::info('FinalizeBarcodePackage: copied Read Me First', ['to' => $readMeDest]);
+        try {
+            // Copy "Read Me First" if it exists
+            $srcBase = resource_path('barcodes');
+            $readMeSrc = $srcBase . DIRECTORY_SEPARATOR . '!Read Me First.pdf';
+            $readMeDest = $rootRel . '/!Read Me First.pdf';
+            if (is_readable($readMeSrc) && !$disk->exists($readMeDest)) {
+                $disk->put($readMeDest, file_get_contents($readMeSrc));
+                Log::info('FinalizeBarcodePackage: copied Read Me First', ['to' => $readMeDest]);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('FinalizeBarcodePackage: failed to copy Read Me First', [
+                'jobRowId' => $this->barcodeJobId,
+                'error'    => $e->getMessage(),
+            ]);
         }
 
         // Get customer and order data from Redis
@@ -254,16 +270,37 @@ class FinalizeBarcodePackage implements ShouldQueue
             $customerJson = Redis::hget($dataKey, 'customer');
             $orderJson = Redis::hget($dataKey, 'order');
             
+            Log::info('FinalizeBarcodePackage: reading customer/order data from Redis', [
+                'jobRowId' => $this->barcodeJobId,
+                'has_customer_json' => !is_null($customerJson),
+                'has_order_json' => !is_null($orderJson),
+            ]);
+            
             if ($customerJson) {
                 $customer = json_decode($customerJson, true);
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    Log::warning('FinalizeBarcodePackage: failed to decode customer JSON', [
+                        'jobRowId' => $this->barcodeJobId,
+                        'error' => json_last_error_msg(),
+                    ]);
+                    $customer = null;
+                }
             }
             if ($orderJson) {
                 $order = json_decode($orderJson, true);
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    Log::warning('FinalizeBarcodePackage: failed to decode order JSON', [
+                        'jobRowId' => $this->barcodeJobId,
+                        'error' => json_last_error_msg(),
+                    ]);
+                    $order = null;
+                }
             }
         } catch (\Throwable $e) {
             Log::warning('FinalizeBarcodePackage: failed to read customer/order data', [
                 'jobRowId' => $this->barcodeJobId,
                 'error'    => $e->getMessage(),
+                'trace'    => $e->getTraceAsString(),
             ]);
         }
 
@@ -273,42 +310,55 @@ class FinalizeBarcodePackage implements ShouldQueue
                 $invoiceGenerator = app(InvoicePdfGenerator::class);
                 $invoiceRel = $rootRel . '/Speedy Invoice-' . $orderNo . '.pdf';
                 $invoiceAbs = $disk->path($invoiceRel);
+                Log::info('FinalizeBarcodePackage: generating invoice', [
+                    'jobRowId' => $this->barcodeJobId,
+                    'invoice_rel' => $invoiceRel,
+                    'invoice_abs' => $invoiceAbs,
+                ]);
                 $invoiceGenerator->generate($invoiceAbs, $customer, $order, $orderNo);
                 Log::info('FinalizeBarcodePackage: generated invoice', ['file' => $invoiceRel]);
             } catch (\Throwable $e) {
                 Log::error('FinalizeBarcodePackage: failed to generate invoice', [
                     'jobRowId' => $this->barcodeJobId,
                     'error'    => $e->getMessage(),
+                    'trace'    => $e->getTraceAsString(),
                 ]);
             }
 
             // Generate certificate(s) for each name
-            if (isset($order['certificate_names']) && is_array($order['certificate_names'])) {
-                $certificateGenerator = app(CertificatePdfGenerator::class);
-                $barcodes = $order['barcodes'] ?? [];
-                
-                foreach ($order['certificate_names'] as $name) {
-                    try {
-                        $certRel = $rootRel . '/Speedy Certificate-' . $orderNo . '.pdf';
-                        $certAbs = $disk->path($certRel);
-                        $certificateGenerator->generate($certAbs, $name, $orderNo, $barcodes);
-                        Log::info('FinalizeBarcodePackage: generated certificate', [
-                            'file' => $certRel,
-                            'name' => $name,
-                        ]);
-                        // Only generate one certificate file (use first name if multiple)
-                        break;
-                    } catch (\Throwable $e) {
-                        Log::error('FinalizeBarcodePackage: failed to generate certificate', [
-                            'jobRowId' => $this->barcodeJobId,
-                            'name'     => $name,
-                            'error'    => $e->getMessage(),
-                        ]);
-                    }
+            if (isset($order['certificate_names']) && is_array($order['certificate_names']) && count($order['certificate_names']) > 0) {
+                try {
+                    $certificateGenerator = app(CertificatePdfGenerator::class);
+                    $barcodes = $order['barcodes'] ?? [];
+                    $name = $order['certificate_names'][0]; // Use first name
+                    
+                    $certRel = $rootRel . '/Speedy Certificate-' . $orderNo . '.pdf';
+                    $certAbs = $disk->path($certRel);
+                    Log::info('FinalizeBarcodePackage: generating certificate', [
+                        'jobRowId' => $this->barcodeJobId,
+                        'cert_rel' => $certRel,
+                        'cert_abs' => $certAbs,
+                        'name' => $name,
+                    ]);
+                    $certificateGenerator->generate($certAbs, $name, $orderNo, $barcodes);
+                    Log::info('FinalizeBarcodePackage: generated certificate', [
+                        'file' => $certRel,
+                        'name' => $name,
+                    ]);
+                } catch (\Throwable $e) {
+                    Log::error('FinalizeBarcodePackage: failed to generate certificate', [
+                        'jobRowId' => $this->barcodeJobId,
+                        'error'    => $e->getMessage(),
+                        'trace'    => $e->getTraceAsString(),
+                    ]);
                 }
+            } else {
+                Log::info('FinalizeBarcodePackage: no certificate names provided, skipping certificate generation', [
+                    'jobRowId' => $this->barcodeJobId,
+                ]);
             }
         } else {
-            Log::warning('FinalizeBarcodePackage: skipping invoice/certificate generation - missing customer/order data', [
+            Log::info('FinalizeBarcodePackage: skipping invoice/certificate generation - missing customer/order data', [
                 'jobRowId' => $this->barcodeJobId,
                 'has_customer' => !is_null($customer),
                 'has_order' => !is_null($order),
