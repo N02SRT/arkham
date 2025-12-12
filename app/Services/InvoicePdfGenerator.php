@@ -22,71 +22,14 @@ class InvoicePdfGenerator
         
         @mkdir(dirname($pdfAbs), 0775, true);
 
-        // Ensure TCPDF constants and directories are set up
-        Log::info('InvoicePdfGenerator: setting up TCPDF constants');
-        if (!defined('K_PATH_MAIN')) {
-            $tcpdfPath = base_path('vendor/tecnickcom/tcpdf/');
-            if (is_dir($tcpdfPath)) {
-                define('K_PATH_MAIN', $tcpdfPath);
-            }
-        }
-        if (!defined('K_PATH_FONTS')) {
-            define('K_PATH_FONTS', storage_path('tcpdf-fonts') . '/');
-        }
-        if (!defined('K_PATH_CACHE')) {
-            define('K_PATH_CACHE', storage_path('framework/cache/tcpdf') . '/');
-        }
-        if (!defined('K_PATH_URL')) {
-            define('K_PATH_URL', '');
-        }
-        $fontsDir = storage_path('tcpdf-fonts');
-        $cacheDir = storage_path('framework/cache/tcpdf');
-        File::ensureDirectoryExists($fontsDir);
-        File::ensureDirectoryExists($cacheDir);
-        
-        // Ensure directories are writable
-        if (!is_writable($fontsDir)) {
-            Log::error('InvoicePdfGenerator: fonts directory not writable', ['dir' => $fontsDir]);
-            throw new \RuntimeException("TCPDF fonts directory not writable: {$fontsDir}");
-        }
-        if (!is_writable($cacheDir)) {
-            Log::error('InvoicePdfGenerator: cache directory not writable', ['dir' => $cacheDir]);
-            throw new \RuntimeException("TCPDF cache directory not writable: {$cacheDir}");
-        }
-        
-        // Ensure system temp directory is writable (TCPDF uses it during construction)
-        $tempDir = sys_get_temp_dir();
-        if (!is_writable($tempDir)) {
-            Log::error('InvoicePdfGenerator: system temp directory not writable', ['temp_dir' => $tempDir]);
-            throw new \RuntimeException("System temp directory not writable: {$tempDir}");
-        }
-        
-        // Set a timeout for TCPDF instantiation (30 seconds)
-        $startTime = microtime(true);
-        $timeout = 30;
-        set_time_limit($timeout + 5); // Add buffer
-        
-        Log::info('InvoicePdfGenerator: creating TCPDF instance', [
-            'timeout' => $timeout,
-            'temp_dir' => $tempDir,
-            'fonts_dir' => $fontsDir,
-            'cache_dir' => $cacheDir,
-        ]);
-        
+        // Create TCPDF instance directly (same approach as writeNumberListPdf which works)
+        Log::info('InvoicePdfGenerator: creating TCPDF instance');
         try {
             $pdf = new TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
-            
-            $elapsed = microtime(true) - $startTime;
-            if ($elapsed > $timeout) {
-                throw new \RuntimeException("TCPDF instantiation took too long: {$elapsed}s");
-            }
-            
-            Log::info('InvoicePdfGenerator: TCPDF instance created', ['elapsed' => round($elapsed, 3)]);
+            Log::info('InvoicePdfGenerator: TCPDF instance created');
         } catch (\Throwable $e) {
-            $elapsed = microtime(true) - $startTime;
             Log::error('InvoicePdfGenerator: failed to create TCPDF instance', [
                 'error' => $e->getMessage(),
-                'elapsed' => round($elapsed, 3),
                 'trace' => $e->getTraceAsString(),
             ]);
             throw $e;
