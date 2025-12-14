@@ -3,8 +3,6 @@
 namespace App\Jobs;
 
 use App\Models\BarcodeJob;
-use App\Services\InvoicePdfGenerator;
-use App\Services\CertificatePdfGenerator;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -278,13 +276,14 @@ class FinalizeBarcodePackage implements ShouldQueue
     }
 
     /**
-     * Generate invoice and certificate PDFs from customer/order data.
+     * Copy static invoice and certificate PDFs.
      */
     private function generateInvoiceAndCertificate($disk, string $rootRel, string $orderNo): void
     {
+        $srcBase = resource_path('barcodes');
+        
+        // Copy "Read Me First" if it exists
         try {
-            // Copy "Read Me First" if it exists
-            $srcBase = resource_path('barcodes');
             $readMeSrc = $srcBase . DIRECTORY_SEPARATOR . '!Read Me First.pdf';
             $readMeDest = $rootRel . '/!Read Me First.pdf';
             if (is_readable($readMeSrc) && !$disk->exists($readMeDest)) {
@@ -298,149 +297,39 @@ class FinalizeBarcodePackage implements ShouldQueue
             ]);
         }
 
-        // Get customer and order data from Redis
-        $dataKey = "barcodes:data:job:{$this->barcodeJobId}";
-        $customer = null;
-        $order = null;
-
+        // Copy static invoice
         try {
-            $customerJson = Redis::hget($dataKey, 'customer');
-            $orderJson = Redis::hget($dataKey, 'order');
-            
-            Log::info('FinalizeBarcodePackage: reading customer/order data from Redis', [
-                'jobRowId' => $this->barcodeJobId,
-                'has_customer_json' => !is_null($customerJson),
-                'has_order_json' => !is_null($orderJson),
-            ]);
-            
-            if ($customerJson) {
-                $customer = json_decode($customerJson, true);
-                if (json_last_error() !== JSON_ERROR_NONE) {
-                    Log::warning('FinalizeBarcodePackage: failed to decode customer JSON', [
-                        'jobRowId' => $this->barcodeJobId,
-                        'error' => json_last_error_msg(),
-                    ]);
-                    $customer = null;
-                }
-            }
-            if ($orderJson) {
-                $order = json_decode($orderJson, true);
-                if (json_last_error() !== JSON_ERROR_NONE) {
-                    Log::warning('FinalizeBarcodePackage: failed to decode order JSON', [
-                        'jobRowId' => $this->barcodeJobId,
-                        'error' => json_last_error_msg(),
-                    ]);
-                    $order = null;
-                }
+            $invoiceSrc = $srcBase . DIRECTORY_SEPARATOR . 'Speedy Invoice-Sample.pdf';
+            $invoiceDest = $rootRel . '/Speedy Invoice-' . $orderNo . '.pdf';
+            if (is_readable($invoiceSrc) && !$disk->exists($invoiceDest)) {
+                $disk->put($invoiceDest, file_get_contents($invoiceSrc));
+                Log::info('FinalizeBarcodePackage: copied static invoice', [
+                    'from' => 'Speedy Invoice-Sample.pdf',
+                    'to' => $invoiceDest,
+                ]);
             }
         } catch (\Throwable $e) {
-            Log::warning('FinalizeBarcodePackage: failed to read customer/order data', [
+            Log::warning('FinalizeBarcodePackage: failed to copy static invoice', [
                 'jobRowId' => $this->barcodeJobId,
                 'error'    => $e->getMessage(),
-                'trace'    => $e->getTraceAsString(),
             ]);
         }
 
-        // Generate invoice if we have customer and order data
-        if ($customer && $order) {
-            try {
-                Log::info('FinalizeBarcodePackage: preparing to generate invoice', [
-                    'jobRowId' => $this->barcodeJobId,
-                    'memory_before' => memory_get_usage(true),
-                    'memory_peak_before' => memory_get_peak_usage(true),
-                    'pid' => getmypid(),
-                    'timestamp' => microtime(true),
-                ]);
-                
-                // Instantiate directly instead of using service container
-                Log::info('FinalizeBarcodePackage: instantiating InvoicePdfGenerator');
-                $invoiceGenerator = new InvoicePdfGenerator();
-                Log::info('FinalizeBarcodePackage: InvoicePdfGenerator instantiated');
-                
-                $invoiceRel = $rootRel . '/Speedy Invoice-' . $orderNo . '.pdf';
-                $invoiceAbs = $disk->path($invoiceRel);
-                Log::info('FinalizeBarcodePackage: generating invoice', [
-                    'jobRowId' => $this->barcodeJobId,
-                    'invoice_rel' => $invoiceRel,
-                    'invoice_abs' => $invoiceAbs,
-                    'customer_keys' => array_keys($customer),
-                    'order_keys' => array_keys($order),
-                    'directory_exists' => is_dir(dirname($invoiceAbs)),
-                    'directory_writable' => is_dir(dirname($invoiceAbs)) ? is_writable(dirname($invoiceAbs)) : false,
-                ]);
-                
-                // Set a timeout to prevent hanging
-                $oldTimeLimit = ini_get('max_execution_time');
-                set_time_limit(60); // 60 seconds max for invoice generation
-                Log::info('FinalizeBarcodePackage: set time limit', [
-                    'old_limit' => $oldTimeLimit,
-                    'new_limit' => ini_get('max_execution_time'),
-                ]);
-                
-                $callStartTime = microtime(true);
-                Log::info('FinalizeBarcodePackage: calling invoiceGenerator->generate()', [
-                    'timestamp' => $callStartTime,
-                ]);
-                $invoiceGenerator->generate($invoiceAbs, $customer, $order, $orderNo);
-                $callElapsed = microtime(true) - $callStartTime;
-                Log::info('FinalizeBarcodePackage: invoiceGenerator->generate() returned', [
-                    'elapsed_seconds' => round($callElapsed, 3),
-                    'memory_after' => memory_get_usage(true),
-                ]);
-                
-                Log::info('FinalizeBarcodePackage: generated invoice', [
-                    'file' => $invoiceRel,
-                    'size' => $disk->exists($invoiceRel) ? $disk->size($invoiceRel) : 0,
-                ]);
-            } catch (\Throwable $e) {
-                Log::error('FinalizeBarcodePackage: failed to generate invoice', [
-                    'jobRowId' => $this->barcodeJobId,
-                    'error'    => $e->getMessage(),
-                    'trace'    => $e->getTraceAsString(),
-                    'file'     => $e->getFile(),
-                    'line'     => $e->getLine(),
-                ]);
-                // Continue processing - invoice is optional
-            }
-
-            // Generate certificate(s) for each name
-            if (isset($order['certificate_names']) && is_array($order['certificate_names']) && count($order['certificate_names']) > 0) {
-                try {
-                    // Instantiate directly instead of using service container
-                    $certificateGenerator = new CertificatePdfGenerator();
-                    $barcodes = $order['barcodes'] ?? [];
-                    $name = $order['certificate_names'][0]; // Use first name
-                    
-                    $certRel = $rootRel . '/Speedy Certificate-' . $orderNo . '.pdf';
-                    $certAbs = $disk->path($certRel);
-                    Log::info('FinalizeBarcodePackage: generating certificate', [
-                        'jobRowId' => $this->barcodeJobId,
-                        'cert_rel' => $certRel,
-                        'cert_abs' => $certAbs,
-                        'name' => $name,
-                    ]);
-                    $certificateGenerator->generate($certAbs, $name, $orderNo, $barcodes);
-                    Log::info('FinalizeBarcodePackage: generated certificate', [
-                        'file' => $certRel,
-                        'name' => $name,
-                    ]);
-                } catch (\Throwable $e) {
-                    Log::error('FinalizeBarcodePackage: failed to generate certificate', [
-                        'jobRowId' => $this->barcodeJobId,
-                        'error'    => $e->getMessage(),
-                        'trace'    => $e->getTraceAsString(),
-                    ]);
-                }
-            } else {
-                Log::info('FinalizeBarcodePackage: no certificate names provided, skipping certificate generation', [
-                    'jobRowId' => $this->barcodeJobId,
+        // Copy static certificate
+        try {
+            $certSrc = $srcBase . DIRECTORY_SEPARATOR . 'Speedy Certificate-Sample.pdf';
+            $certDest = $rootRel . '/Speedy Certificate-' . $orderNo . '.pdf';
+            if (is_readable($certSrc) && !$disk->exists($certDest)) {
+                $disk->put($certDest, file_get_contents($certSrc));
+                Log::info('FinalizeBarcodePackage: copied static certificate', [
+                    'from' => 'Speedy Certificate-Sample.pdf',
+                    'to' => $certDest,
                 ]);
             }
-        } else {
-            Log::info('FinalizeBarcodePackage: skipping invoice/certificate generation - missing customer/order data', [
+        } catch (\Throwable $e) {
+            Log::warning('FinalizeBarcodePackage: failed to copy static certificate', [
                 'jobRowId' => $this->barcodeJobId,
-                'has_customer' => !is_null($customer),
-                'has_order' => !is_null($order),
+                'error'    => $e->getMessage(),
             ]);
         }
     }
