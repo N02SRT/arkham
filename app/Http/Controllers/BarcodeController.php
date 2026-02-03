@@ -206,7 +206,10 @@ class BarcodeController extends Controller
     {
         abort_unless($barcodeJob->zip_rel_path && Storage::exists($barcodeJob->zip_rel_path), 404);
 
-        $name = 'barcodes-'.$barcodeJob->order_no.'-'.$barcodeJob->id.'.zip';
+        $hasArtwork = $this->hasArtwork($barcodeJob);
+        $suffix = $hasArtwork ? 'Full Package' : 'No Artwork';
+        $name = 'Speedy Barcodes Order #' . $barcodeJob->order_no . ' - ' . $suffix . '.zip';
+        
         return response()->download(
             Storage::path($barcodeJob->zip_rel_path),
             $name,
@@ -218,6 +221,43 @@ class BarcodeController extends Controller
     private function add(string $s, int $by): string
     {
         return str_pad((string) ((int) $s + $by), 11, '0', STR_PAD_LEFT);
+    }
+
+    /**
+     * Check if the barcode job has artwork (JPG files).
+     */
+    private function hasArtwork(\App\Models\BarcodeJob $barcodeJob): bool
+    {
+        if (!$barcodeJob->root) {
+            return false;
+        }
+
+        try {
+            $disk = Storage::disk(config('barcodes.disk', config('filesystems.default')));
+            $jpgDirs = [
+                $barcodeJob->root . '/UPC-12/JPG',
+                $barcodeJob->root . '/EAN-13/JPG',
+            ];
+
+            foreach ($jpgDirs as $dir) {
+                if ($disk->exists($dir)) {
+                    $files = $disk->files($dir);
+                    foreach ($files as $file) {
+                        $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+                        if (in_array($ext, ['jpg', 'jpeg'])) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::warning('BarcodeController: failed to check for artwork', [
+                'job_id' => $barcodeJob->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return false;
     }
 
     private function optimizePdfWithGs(string $inPdf, string $outPdf, string $gsPath, int $jpegQ = 70, int $imgDpi = 300): void
@@ -686,7 +726,9 @@ class BarcodeController extends Controller
             abort(404, 'Zip file not found');
         }
 
-        $name = 'barcodes-'.$barcodeJob->order_no.'-'.$barcodeJob->id.'.zip';
+        $hasArtwork = $this->hasArtwork($barcodeJob);
+        $suffix = $hasArtwork ? 'Full Package' : 'No Artwork';
+        $name = 'Speedy Barcodes Order #' . $barcodeJob->order_no . ' - ' . $suffix . '.zip';
         
         Log::info('API: Barcode job download successful', [
             'ip'       => $req->ip(),

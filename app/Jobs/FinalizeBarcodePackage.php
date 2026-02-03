@@ -300,7 +300,7 @@ class FinalizeBarcodePackage implements ShouldQueue
         // Copy static invoice
         try {
             $invoiceSrc = $srcBase . DIRECTORY_SEPARATOR . 'Speedy Invoice-Sample.pdf';
-            $invoiceDest = $rootRel . '/Speedy Invoice-' . $orderNo . '.pdf';
+            $invoiceDest = $rootRel . '/Speedy Invoice - ' . $orderNo . '.pdf';
             if (is_readable($invoiceSrc) && !$disk->exists($invoiceDest)) {
                 $disk->put($invoiceDest, file_get_contents($invoiceSrc));
                 Log::info('FinalizeBarcodePackage: copied static invoice', [
@@ -318,7 +318,7 @@ class FinalizeBarcodePackage implements ShouldQueue
         // Copy static certificate
         try {
             $certSrc = $srcBase . DIRECTORY_SEPARATOR . 'Speedy Certificate-Sample.pdf';
-            $certDest = $rootRel . '/Speedy Certificate-' . $orderNo . '.pdf';
+            $certDest = $rootRel . '/Speedy Certificate - ' . $orderNo . '.pdf';
             if (is_readable($certSrc) && !$disk->exists($certDest)) {
                 $disk->put($certDest, file_get_contents($certSrc));
                 Log::info('FinalizeBarcodePackage: copied static certificate', [
@@ -434,12 +434,12 @@ class FinalizeBarcodePackage implements ShouldQueue
     }
 
     /**
-     * Write UPC-12 number list as Excel (CSV with .xls extension).
+     * Write UPC-12 number list as Excel (CSV with .xlsx extension).
      */
     private function writeUpcNumberListXls($disk, string $rootRel, string $orderNo, array $codes): void
     {
         $csv = "UPC-12\n" . implode("\n", $codes) . "\n";
-        $xlsRel = $rootRel . '/UPC-12/UPC-12 XLS Number List - Order # ' . $orderNo . '.xls';
+        $xlsRel = $rootRel . '/UPC-12/Speedy Barcodes Order #' . $orderNo . ' UPC-12 Number List Excel.xlsx';
         $disk->put($xlsRel, $csv);
         Log::info('FinalizeBarcodePackage: wrote UPC-12 XLS number list', [
             'file'  => $xlsRel,
@@ -461,12 +461,12 @@ class FinalizeBarcodePackage implements ShouldQueue
     }
 
     /**
-     * Write EAN-13 number list as Excel (CSV with .xls extension).
+     * Write EAN-13 number list as Excel (CSV with .xlsx extension).
      */
     private function writeEanNumberListXls($disk, string $rootRel, string $orderNo, array $codes): void
     {
         $csv = "EAN-13\n" . implode("\n", $codes) . "\n";
-        $xlsRel = $rootRel . '/EAN-13/EAN-13 XLS Number List - Order # ' . $orderNo . '.xls';
+        $xlsRel = $rootRel . '/EAN-13/Speedy Barcodes Order #' . $orderNo . ' EAN-13 Number List Excel.xlsx';
         $disk->put($xlsRel, $csv);
         Log::info('FinalizeBarcodePackage: wrote EAN-13 XLS number list', [
             'file'  => $xlsRel,
