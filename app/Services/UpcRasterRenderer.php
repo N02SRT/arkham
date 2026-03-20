@@ -18,7 +18,7 @@ class UpcRasterRenderer
     // Layout (px) — tweak if you want tiny visual adjustments
     private const QUIET_X       = 42; // left/right quiet zone width (also the single-digit boxes)
     private const PAD_TOP       = 12; // top padding before bars
-    private const BAR_EXTEND_Y  = 10; // downward extension so bars sit closer to digits
+    private const BAR_EXTEND_Y  = 25; // downward extension so bars clearly reach into the digit area
     private const GAP_BARS_TX   = -10;  // gap between bars and digits baseline
     private const TEXT_H        = 72; // block height reserved for digits (visual cap)
     private const FONT_SIZE     = 34; // OCR-B point size for 300px height; adjust 32–36 if needed
