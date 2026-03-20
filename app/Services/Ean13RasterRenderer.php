@@ -18,8 +18,9 @@ class Ean13RasterRenderer
     // Layout (px) — tweak if you want tiny visual adjustments
     private const QUIET_X       = 42; // left/right quiet zone width (also the single-digit box)
     private const PAD_TOP       = 12; // top padding before bars
-    private const GAP_BARS_TX   = -10;  // gap between bars and digits baseline
     private const TEXT_H        = 72; // block height reserved for digits (visual cap)
+    private const GUARD_EXTEND_Y = 30; // match UPC raster
+    private const DIGIT_V_ALIGN_FRAC = 0.28;
     private const FONT_SIZE     = 34; // OCR-B point size for 300px height; adjust 32–36 if needed
     private const JPEG_QUALITY  = 70;
 
@@ -73,9 +74,8 @@ class Ean13RasterRenderer
         $y = (int)   self::PAD_TOP;
         $h = (int)   $barsH;
 
-        // Optional: make guard bars a touch taller (visual authenticity)
-        $guardExtra = 6; // px
-        $guardIdx = $this->guardModuleIndices(); // which module indices are guard bars
+        $shortBarBottom = $y + $h;
+        $guardIdx = $this->guardModuleIndices();
 
         // draw bars
         $cursor = 0.0;
@@ -87,11 +87,10 @@ class Ean13RasterRenderer
 
             if ($isBar) {
                 $y1 = $y;
-                $y2 = $y + $h;
-
                 if (isset($guardIdx[$i])) {
-                    // extend guard bars downwards slightly
-                    $y2 = min(self::HEIGHT - 1, $y2 + $guardExtra);
+                    $y2 = min(self::HEIGHT - 1, $shortBarBottom + self::GUARD_EXTEND_Y);
+                } else {
+                    $y2 = min(self::HEIGHT - 1, $shortBarBottom);
                 }
                 imagefilledrectangle($im, $x1, $y1, $x2, $y2, $black);
             }
@@ -100,7 +99,7 @@ class Ean13RasterRenderer
         }
 
         // --- human-readable digits -----------------------------------------
-        $baselineY = (int) round(self::PAD_TOP + $barsH + self::GAP_BARS_TX);
+        $digitBoxTop = $shortBarBottom;
         $halfW     = $barsW / 2.0;
 
         $lead   = substr($ean13, 0, 1);
@@ -110,7 +109,7 @@ class Ean13RasterRenderer
         // left single digit — centered inside left quiet zone
         $this->ttfCenteredBox(
             $im, $ttfAbs, self::FONT_SIZE, $black,
-            0, $baselineY,
+            0, $digitBoxTop,
             self::QUIET_X, self::TEXT_H,
             $lead, 'C'
         );
@@ -118,7 +117,7 @@ class Ean13RasterRenderer
         // left group — centered under the left half of the bars
         $this->ttfCenteredBox(
             $im, $ttfAbs, self::FONT_SIZE, $black,
-            (int) round(self::QUIET_X), $baselineY,
+            (int) round(self::QUIET_X), $digitBoxTop,
             (int) round($halfW), self::TEXT_H,
             $left6, 'C'
         );
@@ -126,7 +125,7 @@ class Ean13RasterRenderer
         // right group — centered under the right half of the bars
         $this->ttfCenteredBox(
             $im, $ttfAbs, self::FONT_SIZE, $black,
-            (int) round(self::QUIET_X + $halfW), $baselineY,
+            (int) round(self::QUIET_X + $halfW), $digitBoxTop,
             (int) round($halfW), self::TEXT_H,
             $right6, 'C'
         );
@@ -251,8 +250,7 @@ class Ean13RasterRenderer
                 $tx = $x + (int) round(($w - $textW) / 2) - $bbox[0];
         }
 
-        // vertical: center within the box; imagettftext expects baseline Y
-        $ty = $yTop + (int) round(($h - $textH) / 2) + $baselineOffset;
+        $ty = $yTop + (int) round(($h - $textH) * self::DIGIT_V_ALIGN_FRAC) + $baselineOffset;
 
         imagettftext($im, $sizePt, 0, $tx, $ty, $color, $ttf, $text);
     }
