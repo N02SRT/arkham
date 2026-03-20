@@ -21,6 +21,7 @@ class UpcRasterRenderer
     private const BAR_EXTEND_Y  = 25; // downward extension so bars clearly reach into the digit area
     private const GAP_BARS_TX   = -10;  // gap between bars and digits baseline
     private const TEXT_H        = 72; // block height reserved for digits (visual cap)
+    private const DIGIT_BG_PAD  = 3;  // white knockout padding around each digit group
     private const FONT_SIZE     = 34; // OCR-B point size for 300px height; adjust 32–36 if needed
     private const JPEG_QUALITY  = 70;
 
@@ -125,7 +126,7 @@ class UpcRasterRenderer
             $im, $ttfAbsPath, self::FONT_SIZE, $black,
             0, $baselineY,
             self::QUIET_X, self::TEXT_H,
-            $lead, 'C'
+            $lead, 'C', $white, self::DIGIT_BG_PAD
         );
 
         // left group — centered under the left half of the bars
@@ -133,7 +134,7 @@ class UpcRasterRenderer
             $im, $ttfAbsPath, self::FONT_SIZE, $black,
             (int) round(self::QUIET_X), $baselineY,
             (int) round($halfW), self::TEXT_H,
-            $left, 'C'
+            $left, 'C', $white, self::DIGIT_BG_PAD
         );
 
         // right group — centered under the right half of the bars
@@ -141,7 +142,7 @@ class UpcRasterRenderer
             $im, $ttfAbsPath, self::FONT_SIZE, $black,
             (int) round(self::QUIET_X + $halfW), $baselineY,
             (int) round($halfW), self::TEXT_H,
-            $right, 'C'
+            $right, 'C', $white, self::DIGIT_BG_PAD
         );
 
         // right single digit — centered inside right quiet zone
@@ -149,7 +150,7 @@ class UpcRasterRenderer
             $im, $ttfAbsPath, self::FONT_SIZE, $black,
             self::WIDTH - self::QUIET_X, $baselineY,
             self::QUIET_X, self::TEXT_H,
-            $chk, 'C'
+            $chk, 'C', $white, self::DIGIT_BG_PAD
         );
 
         // --- save JPEG + tag 300 DPI ---------------------------------------
@@ -230,7 +231,9 @@ class UpcRasterRenderer
         int $w,
         int $h,
         string $text,
-        string $align = 'C'
+        string $align = 'C',
+        ?int $bgColor = null,
+        int $bgPad = 0
     ): void {
         $bbox = imagettfbbox($sizePt, 0, $ttf, $text);
         // width/height from bbox
@@ -252,6 +255,15 @@ class UpcRasterRenderer
 
         // vertical: center within the box; imagettftext expects baseline Y
         $ty = $yTop + (int) round(($h - $textH) / 2) + $baselineOffset;
+
+        // Optional white "knockout" behind digits so extended bars don't cross text.
+        if ($bgColor !== null) {
+            $bgX1 = (int) floor($tx + $bbox[0] - $bgPad);
+            $bgY1 = (int) floor($ty + $bbox[7] - $bgPad);
+            $bgX2 = (int) ceil($tx + $bbox[2] + $bgPad);
+            $bgY2 = (int) ceil($ty + $bbox[1] + $bgPad);
+            imagefilledrectangle($im, $bgX1, $bgY1, $bgX2, $bgY2, $bgColor);
+        }
 
         imagettftext($im, $sizePt, 0, $tx, $ty, $color, $ttf, $text);
     }

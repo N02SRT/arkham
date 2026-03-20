@@ -141,19 +141,13 @@ class RenderBarcodeChunk implements ShouldQueue
                 $eanEpsAbs = Storage::path($eanEpsRel);
 
                 // --- render original JPGs ---
+                // Always re-render JPGs so layout tweaks (bar/text positioning) are reflected immediately.
                 if ($makeJpg) {
-                    if (!$this->isFileCached($disk, $upcJpgRel, $cacheExpiry)) {
-                        $upcRenderer->render($upc12, $upcJpgAbs, $ttf);
-                        Log::info('RenderBarcodeChunk: wrote jpg', ['path' => $upcJpgAbs]);
-                    } else {
-                        Log::debug('RenderBarcodeChunk: skipped jpg (cached)', ['path' => $upcJpgRel]);
-                    }
-                    if (!$this->isFileCached($disk, $eanJpgRel, $cacheExpiry)) {
-                        $eanRenderer->render($ean13, $eanJpgAbs, $ttf);
-                        Log::info('RenderBarcodeChunk: wrote jpg', ['path' => $eanJpgAbs]);
-                    } else {
-                        Log::debug('RenderBarcodeChunk: skipped jpg (cached)', ['path' => $eanJpgRel]);
-                    }
+                    $upcRenderer->render($upc12, $upcJpgAbs, $ttf);
+                    Log::info('RenderBarcodeChunk: wrote jpg', ['path' => $upcJpgAbs]);
+
+                    $eanRenderer->render($ean13, $eanJpgAbs, $ttf);
+                    Log::info('RenderBarcodeChunk: wrote jpg', ['path' => $eanJpgAbs]);
                 }
 
                 // --- PDFs ---
