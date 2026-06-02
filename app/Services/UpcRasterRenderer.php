@@ -18,8 +18,11 @@ class UpcRasterRenderer
     // Layout (px) — tweak if you want tiny visual adjustments
     private const QUIET_X       = 42; // left/right quiet zone width (also the single-digit boxes)
     private const PAD_TOP       = 12; // top padding before bars
-    private const GAP_BARS_TX   = -10;  // gap between bars and digits baseline
     private const TEXT_H        = 72; // block height reserved for digits (visual cap)
+    /** Guard bars only: px below short-bar line (not full digit band — keeps a clear margin under digits). */
+    private const GUARD_EXTEND_Y = 30;
+    /** Vertical position in digit box: share of (box height − glyph height) placed above text (0.5 = centered; lower = text sits higher). */
+    private const DIGIT_V_ALIGN_FRAC = 0.28;
     private const FONT_SIZE     = 34; // OCR-B point size for 300px height; adjust 32–36 if needed
     private const JPEG_QUALITY  = 70;
 
@@ -84,9 +87,9 @@ class UpcRasterRenderer
         $y = (int)   self::PAD_TOP;
         $h = (int)   $barsH;
 
-        // Optional: make guard bars a touch taller (visual authenticity)
-        $guardExtra = 6; // px
-        $guardIdx = $this->guardModuleIndices(); // which module indices are guard bars
+        // Short bars end here; only guards extend slightly into the digit band (UPC-A).
+        $shortBarBottom = $y + $h;
+        $guardIdx = $this->guardModuleIndices();
 
         // draw bars
         $cursor = 0.0;
@@ -98,11 +101,10 @@ class UpcRasterRenderer
 
             if ($isBar) {
                 $y1 = $y;
-                $y2 = $y + $h;
-
                 if (isset($guardIdx[$i])) {
-                    // extend guard bars downwards slightly
-                    $y2 = min(self::HEIGHT - 1, $y2 + $guardExtra);
+                    $y2 = min(self::HEIGHT - 1, $shortBarBottom + self::GUARD_EXTEND_Y);
+                } else {
+                    $y2 = min(self::HEIGHT - 1, $shortBarBottom);
                 }
                 imagefilledrectangle($im, $x1, $y1, $x2, $y2, $black);
             }
@@ -111,7 +113,8 @@ class UpcRasterRenderer
         }
 
         // --- human-readable digits -----------------------------------------
-        $baselineY = (int) round(self::PAD_TOP + $barsH + self::GAP_BARS_TX);
+        // Top of digit band aligns with bottom of short bars (fits: PAD_TOP + barsH + TEXT_H == HEIGHT).
+        $digitBoxTop = $shortBarBottom;
         $halfW     = $barsW / 2.0;
 
         $lead  = substr($upc12, 0, 1);
@@ -122,33 +125,33 @@ class UpcRasterRenderer
         // left single digit — centered inside left quiet zone
         $this->ttfCenteredBox(
             $im, $ttfAbsPath, self::FONT_SIZE, $black,
-            0, $baselineY,
+            0, $digitBoxTop,
             self::QUIET_X, self::TEXT_H,
-            $lead, 'C'
+            $lead, 'C', null, 0
         );
 
         // left group — centered under the left half of the bars
         $this->ttfCenteredBox(
             $im, $ttfAbsPath, self::FONT_SIZE, $black,
-            (int) round(self::QUIET_X), $baselineY,
+            (int) round(self::QUIET_X), $digitBoxTop,
             (int) round($halfW), self::TEXT_H,
-            $left, 'C'
+            $left, 'C', null, 0
         );
 
         // right group — centered under the right half of the bars
         $this->ttfCenteredBox(
             $im, $ttfAbsPath, self::FONT_SIZE, $black,
-            (int) round(self::QUIET_X + $halfW), $baselineY,
+            (int) round(self::QUIET_X + $halfW), $digitBoxTop,
             (int) round($halfW), self::TEXT_H,
-            $right, 'C'
+            $right, 'C', null, 0
         );
 
         // right single digit — centered inside right quiet zone
         $this->ttfCenteredBox(
             $im, $ttfAbsPath, self::FONT_SIZE, $black,
-            self::WIDTH - self::QUIET_X, $baselineY,
+            self::WIDTH - self::QUIET_X, $digitBoxTop,
             self::QUIET_X, self::TEXT_H,
-            $chk, 'C'
+            $chk, 'C', null, 0
         );
 
         // --- save JPEG + tag 300 DPI ---------------------------------------
@@ -229,7 +232,9 @@ class UpcRasterRenderer
         int $w,
         int $h,
         string $text,
-        string $align = 'C'
+        string $align = 'C',
+        ?int $bgColor = null,
+        int $bgPad = 0
     ): void {
         $bbox = imagettfbbox($sizePt, 0, $ttf, $text);
         // width/height from bbox
@@ -249,8 +254,17 @@ class UpcRasterRenderer
                 $tx = $x + (int) round(($w - $textW) / 2) - $bbox[0];
         }
 
-        // vertical: center within the box; imagettftext expects baseline Y
-        $ty = $yTop + (int) round(($h - $textH) / 2) + $baselineOffset;
+        // vertical: bias slightly toward top of digit band so numbers sit higher than true center
+        $ty = $yTop + (int) round(($h - $textH) * self::DIGIT_V_ALIGN_FRAC) + $baselineOffset;
+
+        // Optional white "knockout" behind digits so extended bars don't cross text.
+        if ($bgColor !== null) {
+            $bgX1 = (int) floor($tx + $bbox[0] - $bgPad);
+            $bgY1 = (int) floor($ty + $bbox[7] - $bgPad);
+            $bgX2 = (int) ceil($tx + $bbox[2] + $bgPad);
+            $bgY2 = (int) ceil($ty + $bbox[1] + $bgPad);
+            imagefilledrectangle($im, $bgX1, $bgY1, $bgX2, $bgY2, $bgColor);
+        }
 
         imagettftext($im, $sizePt, 0, $tx, $ty, $color, $ttf, $text);
     }

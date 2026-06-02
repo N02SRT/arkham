@@ -11,9 +11,11 @@ class VectorBarcodeRenderer
     private const QUIET_X_PT = 10.08;  // 42px quiet zone
     private const PAD_TOP_PT = 2.88;   // 12px top padding
     private const TEXT_H_PT  = 17.28;  // 72px text height
-    private const GAP_BARS_TX_PT = -2.4; // -10px gap (negative means overlap)
+    /** Top of digit band = bottom of short bars (0px gap); matches raster JPG layout. */
+    private const GAP_BARS_TX_PT = 0.0;
     private const FONT_SIZE_PT = 8.16; // 34pt font scaled
-    private const GUARD_EXTRA_PT = 1.44; // 6px extra for guard bars
+    /** 30px guard extension @ 300px canvas → 72pt page: 30 * (72/300) */
+    private const GUARD_EXTRA_PT = 7.2;
 
     // EAN-13 encode maps
     private array $L = [
@@ -128,18 +130,11 @@ class VectorBarcodeRenderer
     private function pdfHriCommandsJpg(string $type, string $digits, float $quietX, float $barsW, float $padTop, float $barsH): string
     {
         // PDF coordinate system: (0,0) is bottom-left, so we need to flip Y coordinates
-        // Match JPG exactly: 
-        // - Bars end at: padTop + barsH from top
-        // - In JPG: baselineY = PAD_TOP + barsH + GAP_BARS_TX (where GAP_BARS_TX = -10px)
-        // - This gives: 12 + 216 + (-10) = 218px from top
-        // - But bars end at 228px, so text box starts 10px before bars end (overlap!)
-        // - ttfCenteredBox centers text vertically within TEXT_H (72px), so text appears lower
-        // Position text well below bars - use bottom portion of text area
+        // Match raster JPG: short bars end at padTop+barsH; digit band starts there (GAP_BARS_TX_PT=0).
+        // Raster uses DIGIT_V_ALIGN_FRAC ≈0.28; approximate baseline with ~0.40 of TEXT_H.
         $barsEndFromTop = $padTop + $barsH;
-        // Text box top (from JPG calculation)
         $textBoxTopFromTop = $barsEndFromTop + self::GAP_BARS_TX_PT;
-        // Position text baseline in bottom portion of TEXT_H area (around 70% down) to ensure it's clearly below bars
-        $textBaselineFromTop = $textBoxTopFromTop + (self::TEXT_H_PT * 0.6);
+        $textBaselineFromTop = $textBoxTopFromTop + (self::TEXT_H_PT * 0.40);
         // Convert to bottom-based coordinates for PDF
         $baselineYFromBottom = self::HEIGHT_PT - $textBaselineFromTop;
         
@@ -158,22 +153,22 @@ class VectorBarcodeRenderer
             $chk = $d[11];
             
             // Left single digit - centered in left quiet zone (x=0, width=QUIET_X, centered)
-            // JPG: ttfCenteredBox(im, ttf, size, color, 0, baselineY, QUIET_X, TEXT_H, lead, 'C')
+            // JPG: ttfCenteredBox(..., 0, digitBoxTop, QUIET_X, TEXT_H, lead, 'C')
             $xLead = ($quietX / 2) - ($cw / 2);
             $s .= $this->pdfTm($xLead, $baselineYFromBottom) . "({$lead}) Tj ";
             
             // Left group - centered under left half (x=QUIET_X, width=halfW, centered)
-            // JPG: ttfCenteredBox(im, ttf, size, color, QUIET_X, baselineY, halfW, TEXT_H, left, 'C')
+            // JPG: ttfCenteredBox(..., QUIET_X, digitBoxTop, halfW, TEXT_H, left, 'C')
             $xLeft = $quietX + ($halfW / 2) - (strlen($left) * $cw / 2);
             $s .= $this->pdfTm($xLeft, $baselineYFromBottom) . "({$left}) Tj ";
             
             // Right group - centered under right half (x=QUIET_X+halfW, width=halfW, centered)
-            // JPG: ttfCenteredBox(im, ttf, size, color, QUIET_X+halfW, baselineY, halfW, TEXT_H, right, 'C')
+            // JPG: ttfCenteredBox(..., QUIET_X+halfW, digitBoxTop, halfW, TEXT_H, right, 'C')
             $xRight = $quietX + $halfW + ($halfW / 2) - (strlen($right) * $cw / 2);
             $s .= $this->pdfTm($xRight, $baselineYFromBottom) . "({$right}) Tj ";
             
             // Right single digit - centered in right quiet zone (x=WIDTH-QUIET_X, width=QUIET_X, centered)
-            // JPG: ttfCenteredBox(im, ttf, size, color, WIDTH-QUIET_X, baselineY, QUIET_X, TEXT_H, chk, 'C')
+            // JPG: ttfCenteredBox(..., WIDTH-QUIET_X, digitBoxTop, QUIET_X, TEXT_H, chk, 'C')
             $xChk = (self::WIDTH_PT - $quietX) + ($quietX / 2) - ($cw / 2);
             $s .= $this->pdfTm($xChk, $baselineYFromBottom) . "({$chk}) Tj ";
             
@@ -508,12 +503,10 @@ class VectorBarcodeRenderer
      */
     private function epsHriCommandsJpg(string $type, string $digits, float $quietX, float $barsW, float $padTop, float $barsH): string
     {
-        // EPS coordinate system: (0,0) is bottom-left (same as PDF)
-        // Match JPG exactly - position text well below bars
+        // EPS: same top-based layout as PDF / raster JPG
         $barsEndFromTop = $padTop + $barsH;
         $textBoxTopFromTop = $barsEndFromTop + self::GAP_BARS_TX_PT;
-        // Position text baseline in bottom portion of TEXT_H area (around 70% down)
-        $textBaselineFromTop = $textBoxTopFromTop + (self::TEXT_H_PT * 0.6);
+        $textBaselineFromTop = $textBoxTopFromTop + (self::TEXT_H_PT * 0.40);
         $baselineY = self::HEIGHT_PT - $textBaselineFromTop;
         $halfW = $barsW / 2.0;
         $fontSize = self::FONT_SIZE_PT;
