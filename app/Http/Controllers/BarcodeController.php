@@ -322,10 +322,14 @@ class BarcodeController extends Controller
                 // Optional webhook back to the caller (e.g. Speedy)
                 'callback_url'   => ['nullable', 'url', 'max:2000'],
                 'callback_token' => ['nullable', 'string', 'max:255'],
-                // Optional per-job output format selection
-                // e.g. ["jpg","pdf"], ["jpg","pdf","eps","xls"], etc.
+                // Optional per-job output format selection.
+                // Supports both legacy names and explicit art/number-list names.
                 'formats'   => ['nullable', 'array'],
-                'formats.*' => ['string', Rule::in(['jpg','pdf','eps','xls'])],
+                'formats.*' => ['string', Rule::in([
+                    'jpg', 'pdf', 'eps', 'xls',
+                    'art_jpg', 'art_pdf', 'art_eps',
+                    'num_pdf', 'num_xls',
+                ])],
                 // Customer and order data for invoice/certificate generation
                 'customer' => ['nullable', 'array'],
                 'customer.name' => ['nullable', 'string', 'max:255'],
@@ -461,17 +465,45 @@ class BarcodeController extends Controller
         $optKey = "barcodes:options:job:{$job->id}";
         try {
             if (is_array($formats) && count($formats) > 0) {
-                $jpg = in_array('jpg', $formats, true);
-                $pdf = in_array('pdf', $formats, true);
-                $eps = in_array('eps', $formats, true);
-                $xls = in_array('xls', $formats, true);
+                $hasExplicitNames = collect($formats)->contains(function ($fmt) {
+                    return str_starts_with((string) $fmt, 'art_') || str_starts_with((string) $fmt, 'num_');
+                });
 
-                Redis::hset($optKey, 'jpg', $jpg ? '1' : '0');
-                Redis::hset($optKey, 'pdf', $pdf ? '1' : '0');
-                Redis::hset($optKey, 'eps', $eps ? '1' : '0');
-                Redis::hset($optKey, 'xls', $xls ? '1' : '0');
+                if ($hasExplicitNames) {
+                    $artJpg = in_array('art_jpg', $formats, true);
+                    $artPdf = in_array('art_pdf', $formats, true);
+                    $artEps = in_array('art_eps', $formats, true);
+                    $numXls = in_array('num_xls', $formats, true);
+                    $numPdf = in_array('num_pdf', $formats, true);
+                } else {
+                    // Legacy mapping support.
+                    $artJpg = in_array('jpg', $formats, true);
+                    $artPdf = in_array('pdf', $formats, true);
+                    $artEps = in_array('eps', $formats, true);
+                    $numXls = in_array('xls', $formats, true);
+                    // Legacy behavior generated number-list PDF whenever XLS was enabled.
+                    $numPdf = $numXls;
+                }
+
+                // Explicit keys used by newer packaging logic.
+                Redis::hset($optKey, 'art_jpg', $artJpg ? '1' : '0');
+                Redis::hset($optKey, 'art_pdf', $artPdf ? '1' : '0');
+                Redis::hset($optKey, 'art_eps', $artEps ? '1' : '0');
+                Redis::hset($optKey, 'num_xls', $numXls ? '1' : '0');
+                Redis::hset($optKey, 'num_pdf', $numPdf ? '1' : '0');
+
+                // Legacy keys used by older workers/controllers.
+                Redis::hset($optKey, 'jpg', $artJpg ? '1' : '0');
+                Redis::hset($optKey, 'pdf', $artPdf ? '1' : '0');
+                Redis::hset($optKey, 'eps', $artEps ? '1' : '0');
+                Redis::hset($optKey, 'xls', ($numXls || $numPdf) ? '1' : '0');
             } else {
                 // Defaults: JPG on, XLS on, PDF/EPS from config
+                Redis::hset($optKey, 'art_jpg', '1');
+                Redis::hset($optKey, 'art_pdf', config('barcodes.enable_pdf', false) ? '1' : '0');
+                Redis::hset($optKey, 'art_eps', config('barcodes.enable_eps', false) ? '1' : '0');
+                Redis::hset($optKey, 'num_xls', '1');
+                Redis::hset($optKey, 'num_pdf', '1');
                 Redis::hset($optKey, 'jpg', '1');
                 Redis::hset($optKey, 'xls', '1');
                 Redis::hset($optKey, 'pdf', config('barcodes.enable_pdf', false) ? '1' : '0');
@@ -660,9 +692,10 @@ class BarcodeController extends Controller
             'failed_jobs'    => $barcodeJob->failed_jobs,
             'percentage'     => $pct,
             'finished'       => (bool) $barcodeJob->finished_at,
-            'started_at'     => $barcodeJob->started_at?->toISOString(),
-            'finished_at'    => $barcodeJob->finished_at?->toISOString(),
-            'zip_url'        => $zipExists ? route('api.barcodes.download', $barcodeJob->id) : null,
+            'ready'          => $zipExists,
+            'started_at'     => $barcodeJob->started_at?->toIso8601String(),
+            'finished_at'    => $barcodeJob->finished_at?->toIso8601String(),
+            'zip_url'        => $zipExists ? url('/api/barcodes/' . $barcodeJob->id . '/download') : null,
         ]);
     }
 

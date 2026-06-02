@@ -340,14 +340,27 @@ class FinalizeBarcodePackage implements ShouldQueue
      */
     private function writeNumberLists($disk, string $rootRel, string $orderNo): void
     {
-        // Check per-job options to see if XLS is desired
+        // Check per-job options to see if number-list XLS/PDF outputs are desired.
         $optKey = "barcodes:options:job:{$this->barcodeJobId}";
         $upcCodes = [];
         $eanCodes = [];
         
         try {
-            $xlsOpt = Redis::hget($optKey, 'xls');
-            if ($xlsOpt === '0') {
+            $numXlsOpt = Redis::hget($optKey, 'num_xls');
+            $numPdfOpt = Redis::hget($optKey, 'num_pdf');
+
+            // Backward compatibility for old jobs that only used xls flag.
+            if ($numXlsOpt === null && $numPdfOpt === null) {
+                $legacyXls = Redis::hget($optKey, 'xls');
+                if ($legacyXls !== null) {
+                    $numXlsOpt = $legacyXls;
+                    $numPdfOpt = $legacyXls;
+                }
+            }
+
+            $shouldWriteXls = $numXlsOpt !== '0';
+            $shouldWritePdf = $numPdfOpt !== '0';
+            if (!$shouldWriteXls && !$shouldWritePdf) {
                 Log::info('FinalizeBarcodePackage: XLS generation disabled for job', [
                     'jobRowId' => $this->barcodeJobId,
                     'root'     => $rootRel,
@@ -424,13 +437,33 @@ class FinalizeBarcodePackage implements ShouldQueue
             return;
         }
 
+        $numXlsOpt = Redis::hget($optKey, 'num_xls');
+        $numPdfOpt = Redis::hget($optKey, 'num_pdf');
+        if ($numXlsOpt === null && $numPdfOpt === null) {
+            $legacyXls = Redis::hget($optKey, 'xls');
+            if ($legacyXls !== null) {
+                $numXlsOpt = $legacyXls;
+                $numPdfOpt = $legacyXls;
+            }
+        }
+        $shouldWriteXls = $numXlsOpt !== '0';
+        $shouldWritePdf = $numPdfOpt !== '0';
+
         // Generate UPC-12 number lists
-        $this->writeUpcNumberListXls($disk, $rootRel, $orderNo, $upcCodes);
-        $this->writeUpcNumberListPdf($disk, $rootRel, $orderNo, $upcCodes);
+        if ($shouldWriteXls) {
+            $this->writeUpcNumberListXls($disk, $rootRel, $orderNo, $upcCodes);
+        }
+        if ($shouldWritePdf) {
+            $this->writeUpcNumberListPdf($disk, $rootRel, $orderNo, $upcCodes);
+        }
 
         // Generate EAN-13 number lists
-        $this->writeEanNumberListXls($disk, $rootRel, $orderNo, $eanCodes);
-        $this->writeEanNumberListPdf($disk, $rootRel, $orderNo, $eanCodes);
+        if ($shouldWriteXls) {
+            $this->writeEanNumberListXls($disk, $rootRel, $orderNo, $eanCodes);
+        }
+        if ($shouldWritePdf) {
+            $this->writeEanNumberListPdf($disk, $rootRel, $orderNo, $eanCodes);
+        }
     }
 
     /**
