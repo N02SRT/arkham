@@ -762,26 +762,40 @@ class BarcodeController extends Controller
             ], 410); // 410 Gone - resource was replaced
         }
 
-        $zipRel = $barcodeJob->zip_rel_path;
+        // The caller (Speedy proxy) frequently hits /download a moment before the
+        // finalizer has written the zip, and it surfaces any non-200 as a generic
+        // "try again" error. To make the single call succeed, briefly wait for the
+        // zip to appear instead of failing immediately on the race.
+        $zipRelGuess = dirname($barcodeJob->root) . '/' . basename($barcodeJob->root) . '.zip';
+        $waitSeconds = (float) config('barcodes.download_wait_seconds', 25);
+        $waitUntil   = microtime(true) + $waitSeconds;
+        @set_time_limit((int) ceil($waitSeconds) + 30);
 
-        // Self-heal: the finalizer may have written the zip by convention but
-        // failed to persist zip_rel_path (e.g. a crash/DB hiccup mid-finalize).
-        // Recover by checking the conventional path before giving up.
-        if (!$zipRel || !Storage::exists($zipRel)) {
-            $zipRelGuess = dirname($barcodeJob->root) . '/' . basename($barcodeJob->root) . '.zip';
-            if (Storage::exists($zipRelGuess)) {
-                $barcodeJob->forceFill([
-                    'zip_rel_path' => $zipRelGuess,
-                    'finished_at'  => $barcodeJob->finished_at ?? now(),
-                ])->save();
-                $zipRel = $zipRelGuess;
+        $zipRel = null;
+        while (true) {
+            // Persisted path first; re-read the row since another server finalizes it.
+            $candidate = $barcodeJob->zip_rel_path
+                ?: optional(BarcodeJob::find($barcodeJob->id))->zip_rel_path;
+
+            if ($candidate && Storage::exists($candidate)) {
+                $zipRel = $candidate;
+                break;
             }
+            // Self-heal: finalizer wrote the zip by convention but didn't persist
+            // zip_rel_path (e.g. a crash/DB hiccup mid-finalize).
+            if (Storage::exists($zipRelGuess)) {
+                $zipRel = $zipRelGuess;
+                break;
+            }
+            if (microtime(true) >= $waitUntil) {
+                break;
+            }
+            usleep(750000); // 0.75s between checks
         }
 
-        if (!$zipRel || !Storage::exists($zipRel)) {
-            // The package isn't ready yet. This is almost always the caller
-            // requesting /download before finalize has written the zip. Tell it
-            // to poll status and retry rather than treating this as permanent.
+        if (!$zipRel) {
+            // Still not ready after the grace window — genuinely not built yet
+            // (e.g. a very large order still finalizing) or truly missing.
             $stillProcessing = !$barcodeJob->finished_at;
             Log::warning('API: Barcode job download not ready', [
                 'ip'              => $req->ip(),
@@ -789,6 +803,7 @@ class BarcodeController extends Controller
                 'order_no'        => $barcodeJob->order_no,
                 'zip_path'        => $barcodeJob->zip_rel_path,
                 'still_processing'=> $stillProcessing,
+                'waited_seconds'  => $waitSeconds,
             ]);
 
             return response()->json([
@@ -799,6 +814,14 @@ class BarcodeController extends Controller
                 'ready'      => false,
                 'status_url' => url('/api/barcodes/' . $barcodeJob->id),
             ], $stillProcessing ? 409 : 404);
+        }
+
+        // Persist the resolved path if it wasn't already recorded.
+        if ($barcodeJob->zip_rel_path !== $zipRel) {
+            $barcodeJob->forceFill([
+                'zip_rel_path' => $zipRel,
+                'finished_at'  => $barcodeJob->finished_at ?? now(),
+            ])->save();
         }
 
         $hasArtwork = $this->hasArtwork($barcodeJob);
