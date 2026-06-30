@@ -47,6 +47,17 @@ return [
             'report' => false,
         ],
 
+        // Shared NFS-backed disk so all servers (app + workers) read/write the
+        // same barcode files. SHARED_DISK_ROOT must point at the common mount
+        // (e.g. /mnt/barcodes) on every server. Set FILESYSTEM_DISK=shared.
+        'shared' => [
+            'driver' => 'local',
+            'root' => env('SHARED_DISK_ROOT', storage_path('app/private')),
+            'serve' => true,
+            'throw' => false,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),
