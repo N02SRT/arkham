@@ -148,6 +148,15 @@ class FinalizeBarcodePackage implements ShouldQueue
             
             $zipAbs = $disk->path($zipRel);
 
+            // Build into a unique temp file, then atomically rename onto the final
+            // path. A same-filesystem rename is atomic, so /download (and the cache
+            // check) only ever see the fully-complete zip — never a half-written
+            // one. This also prevents a duplicate finalizer from truncating the
+            // live file in place while it's being served.
+            $zipTmpRel = $zipRel . '.building-' . getmypid() . '-' . uniqid();
+            $zipTmpAbs = $disk->path($zipTmpRel);
+            @unlink($zipTmpAbs);
+
             // The zip step is the long part for large packages; give the lock a
             // fresh full TTL so it can't expire mid-zip and let a second
             // finalizer start on another worker.
@@ -157,18 +166,31 @@ class FinalizeBarcodePackage implements ShouldQueue
             [$expectedFiles, $expectedBytes] = $this->countFilesAndBytes($rootAbs);
 
             // Prefer multi-core 7-Zip if present
-            $usedSevenZ = $this->buildZipMultiCore($rootAbs, $zipAbs);
+            $usedSevenZ = $this->buildZipMultiCore($rootAbs, $zipTmpAbs);
             $added = $expectedFiles;
             $bytes = $expectedBytes;
 
             if (!$usedSevenZ) {
                 // Fallback to ZipArchive (single-threaded)
-                [$added, $bytes] = $this->buildZipWithZipArchive($rootAbs, $zipAbs);
+                [$added, $bytes] = $this->buildZipWithZipArchive($rootAbs, $zipTmpAbs);
             }
 
-            if (!$disk->exists($zipRel)) {
-                throw new \RuntimeException("Zip not found after close: {$zipAbs}");
+            if (!is_file($zipTmpAbs) || filesize($zipTmpAbs) === 0) {
+                @unlink($zipTmpAbs);
+                throw new \RuntimeException("Zip not found/empty after close: {$zipTmpAbs}");
             }
+
+            // Atomic publish.
+            if (!@rename($zipTmpAbs, $zipAbs) || !$disk->exists($zipRel)) {
+                @unlink($zipTmpAbs);
+                throw new \RuntimeException("Zip publish (rename) failed: {$zipTmpAbs} -> {$zipAbs}");
+            }
+
+            Log::info('FinalizeBarcodePackage: zip published atomically', [
+                'jobRowId' => $this->barcodeJobId,
+                'zip'      => $zipRel,
+                'bytes'    => filesize($zipAbs),
+            ]);
 
             // 5) Update DB so the UI shows the download button
             $bj = BarcodeJob::find($this->barcodeJobId);
@@ -238,6 +260,10 @@ class FinalizeBarcodePackage implements ShouldQueue
                 'engine'=> $usedSevenZ ? '7z' : 'ZipArchive',
             ]);
         } catch (\Throwable $e) {
+            // Drop any half-written temp zip so it can't linger or be picked up.
+            if (isset($zipTmpAbs) && is_file($zipTmpAbs)) {
+                @unlink($zipTmpAbs);
+            }
             Log::error('FinalizeBarcodePackage: failed', [
                 'root'   => $this->root,
                 'jobRowId' => $this->barcodeJobId,
