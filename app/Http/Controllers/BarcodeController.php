@@ -51,12 +51,25 @@ class BarcodeController extends Controller
             ]);
         }
 
+        // Determine readiness. Self-heal a stale DB row: if zip_rel_path was never
+        // persisted (e.g. the finalize job updated disk but not the model, or a race),
+        // fall back to the conventional ZIP path so /status doesn't get stuck reporting
+        // ready:false while the ZIP actually exists on disk.
+        $zipExists = $barcodeJob->zip_rel_path && Storage::exists($barcodeJob->zip_rel_path);
+        if (!$zipExists && $barcodeJob->root) {
+            $zipRelGuess = dirname($barcodeJob->root) . '/' . basename($barcodeJob->root) . '.zip';
+            if (Storage::exists($zipRelGuess)) {
+                $barcodeJob->update(['zip_rel_path' => $zipRelGuess, 'finished_at' => $barcodeJob->finished_at ?? now()]);
+                $zipExists = true;
+            }
+        }
+
         return response()->json([
             'batch_id'       => $barcodeJob->batch_id,
             'processed_jobs' => $barcodeJob->processed_jobs ?? 0,
             'total_jobs'     => $barcodeJob->total_jobs ?? 0,
             'failed_jobs'    => $barcodeJob->failed_jobs ?? 0,
-            'ready'          => $barcodeJob->zip_rel_path && Storage::exists($barcodeJob->zip_rel_path),
+            'ready'          => $zipExists,
         ]);
     }
 
@@ -749,14 +762,43 @@ class BarcodeController extends Controller
             ], 410); // 410 Gone - resource was replaced
         }
 
-        if (!$barcodeJob->zip_rel_path || !Storage::exists($barcodeJob->zip_rel_path)) {
-            Log::warning('API: Barcode job download failed - file not found', [
-                'ip'       => $req->ip(),
-                'job_id'   => $barcodeJob->id,
-                'order_no' => $barcodeJob->order_no,
-                'zip_path' => $barcodeJob->zip_rel_path,
+        $zipRel = $barcodeJob->zip_rel_path;
+
+        // Self-heal: the finalizer may have written the zip by convention but
+        // failed to persist zip_rel_path (e.g. a crash/DB hiccup mid-finalize).
+        // Recover by checking the conventional path before giving up.
+        if (!$zipRel || !Storage::exists($zipRel)) {
+            $zipRelGuess = dirname($barcodeJob->root) . '/' . basename($barcodeJob->root) . '.zip';
+            if (Storage::exists($zipRelGuess)) {
+                $barcodeJob->forceFill([
+                    'zip_rel_path' => $zipRelGuess,
+                    'finished_at'  => $barcodeJob->finished_at ?? now(),
+                ])->save();
+                $zipRel = $zipRelGuess;
+            }
+        }
+
+        if (!$zipRel || !Storage::exists($zipRel)) {
+            // The package isn't ready yet. This is almost always the caller
+            // requesting /download before finalize has written the zip. Tell it
+            // to poll status and retry rather than treating this as permanent.
+            $stillProcessing = !$barcodeJob->finished_at;
+            Log::warning('API: Barcode job download not ready', [
+                'ip'              => $req->ip(),
+                'job_id'          => $barcodeJob->id,
+                'order_no'        => $barcodeJob->order_no,
+                'zip_path'        => $barcodeJob->zip_rel_path,
+                'still_processing'=> $stillProcessing,
             ]);
-            abort(404, 'Zip file not found');
+
+            return response()->json([
+                'error'      => $stillProcessing ? 'Not ready' : 'Zip not found',
+                'message'    => $stillProcessing
+                    ? 'The package is still being generated. Poll the status endpoint until "ready" is true (or use zip_url), then download.'
+                    : 'The zip file could not be found for this job.',
+                'ready'      => false,
+                'status_url' => url('/api/barcodes/' . $barcodeJob->id),
+            ], $stillProcessing ? 409 : 404);
         }
 
         $hasArtwork = $this->hasArtwork($barcodeJob);
@@ -768,11 +810,11 @@ class BarcodeController extends Controller
             'job_id'   => $barcodeJob->id,
             'order_no' => $barcodeJob->order_no,
             'filename' => $name,
-            'zip_path' => $barcodeJob->zip_rel_path,
+            'zip_path' => $zipRel,
         ]);
 
         return response()->download(
-            Storage::path($barcodeJob->zip_rel_path),
+            Storage::path($zipRel),
             $name,
             ['Content-Type' => 'application/zip']
         );
