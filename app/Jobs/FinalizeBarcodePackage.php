@@ -32,9 +32,11 @@ class FinalizeBarcodePackage implements ShouldQueue
     {
         $lockKey = "barcodes:finalize:lock:{$this->barcodeJobId}";
         $lockValue = (string) (time() . '-' . getmypid());
-        
+        // Lock must outlive the (potentially very long) zip of large packages.
+        $lockTtl = (int) config('barcodes.finalize_lock_ttl', 3600);
+
         // Try to acquire lock with atomic set-if-not-exists
-        if (!Redis::set($lockKey, $lockValue, 'EX', 600, 'NX')) {
+        if (!Redis::set($lockKey, $lockValue, 'EX', $lockTtl, 'NX')) {
             Log::info('FinalizeBarcodePackage: another finalizer already running', [
                 'jobRowId' => $this->barcodeJobId,
                 'lock_key' => $lockKey,
@@ -145,6 +147,11 @@ class FinalizeBarcodePackage implements ShouldQueue
             }
             
             $zipAbs = $disk->path($zipRel);
+
+            // The zip step is the long part for large packages; give the lock a
+            // fresh full TTL so it can't expire mid-zip and let a second
+            // finalizer start on another worker.
+            try { Redis::expire($lockKey, $lockTtl); } catch (\Throwable $e) {}
 
             // Pre-count for logging (also useful when 7z path is used)
             [$expectedFiles, $expectedBytes] = $this->countFilesAndBytes($rootAbs);
